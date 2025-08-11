@@ -28,6 +28,10 @@ To get started, follow these steps:
     summaries using a colourful terminal interface.
  <img src="https://i.ibb.co/hCh6vXB/image.png" width=500/>
 
+> **Note:** ensure that you have sufficient free disk space before running the
+> collector. The script will now stop gracefully if the disk fills up while
+> copying templates.
+
 ## Result :file_folder:
 
 Once the script completes, it will display the total count of templates in a tabular format. It will create a folder named `Templates`  in the repository's root directory. Inside this folder, you'll find subfolders for each cloned repository segregated as per publication year `CVE-20XX` and others as `Vulnerability-Templates`. Each template is stored as a separate file, enabling easy access and utilization for your bug bounty or security testing activities.

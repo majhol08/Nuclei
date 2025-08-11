@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import time
+import errno
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
@@ -111,10 +112,22 @@ def clone_repositories(file_url: str, templates_dir: str, max_workers: int = 6) 
                 else:
                     destination_folder = os.path.join(templates_dir, "Vulnerability-Templates")
                 os.makedirs(destination_folder, exist_ok=True)
-                shutil.copy2(source_path, os.path.join(destination_folder, file))
+                try:
+                    shutil.copy2(source_path, os.path.join(destination_folder, file))
+                except OSError as exc:
+                    if exc.errno == errno.ENOSPC:
+                        console.print(
+                            f"[red]No space left on device while copying {file}. Aborting.[/]"
+                        )
+                    else:
+                        console.print(
+                            f"[red]Failed to copy {file}: {exc.strerror or exc}[/]"
+                        )
+                    shutil.rmtree(trash_dir, ignore_errors=True)
+                    return
 
     console.print("\n[green]Removing caches and temporary files[/]")
-    shutil.rmtree(trash_dir)
+    shutil.rmtree(trash_dir, ignore_errors=True)
     time.sleep(1)
 
 
