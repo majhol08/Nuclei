@@ -22,10 +22,20 @@ To get started, follow these steps:
 ```pip install -r requirements.txt```  :key:
 
 3.  Run the script (use `-h` to see available options):
-```python AllForOne.py```  :snake:
 
-4.  Sit back and relax! The script will start collecting the Nuclei templates from public repositories and present progress and
-    summaries using a colourful terminal interface.
+```bash
+python AllForOne.py --repo-list-url <url> --output-dir <directory>
+```
+
+   - `--repo-list-url` *(optional)* URL pointing to a text file containing
+     repository links. Defaults to
+     `https://raw.githubusercontent.com/AggressiveUser/AllForOne/main/PleaseUpdateMe.txt`
+   - `--output-dir` *(optional)* directory where the collected templates will be
+     stored. Defaults to `Templates`
+
+4.  Sit back and relax! The script will start collecting the Nuclei templates
+    from public repositories and present progress and summaries using a
+    colourful terminal interface.
  <img src="https://i.ibb.co/hCh6vXB/image.png" width=500/>
 
 > **Note:** ensure that you have sufficient free disk space before running the

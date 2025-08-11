@@ -192,10 +192,6 @@ def main() -> None:
 
     clone_repositories(args.repo_list_url, templates_dir)
     summarize_templates(templates_dir)
-    console.print(
-        "\n[bold yellow]Please show your support by giving a star to the GitHub repository 'AllForOne'.[/]"
-    )
-    console.print("GITHUB: https://github.com/AggressiveUser/AllForOne", style="cyan")
 
 
 if __name__ == "__main__":
