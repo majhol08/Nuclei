@@ -62,8 +62,14 @@ def clone_repository(repo: str, trash_dir: str) -> str | None:
     return None
 
 
-def clone_repositories(file_url: str, templates_dir: str, max_workers: int = 6) -> None:
-    """Clone all repositories listed at ``file_url`` into ``templates_dir``."""
+def clone_repositories(
+    file_url: str,
+    templates_dir: str,
+    max_workers: int = 6,
+) -> tuple[list[str], list[str], list[str]]:
+    """Clone all repositories listed at ``file_url`` into ``templates_dir``.
+
+    Returns lists of successful, skipped and failed repository URLs."""
 
     console.print(f"[bold]Fetching repository list from:[/] {file_url}")
     try:
@@ -72,11 +78,27 @@ def clone_repositories(file_url: str, templates_dir: str, max_workers: int = 6) 
         repositories = [r for r in response.text.strip().split("\n") if r]
     except requests.RequestException as exc:  # pragma: no cover - network failure
         console.print(f"[red]Failed to retrieve repository list: {exc}[/]")
-        return
+        return [], [], []
 
-    total_repos = len(repositories)
+    accessible_repos: list[str] = []
+    skipped_repos: list[str] = []
+    for repo in repositories:
+        try:
+            resp = requests.head(repo, allow_redirects=True, timeout=15)
+            if resp.status_code == 404:
+                skipped_repos.append(repo)
+            else:
+                accessible_repos.append(repo)
+        except requests.RequestException:
+            skipped_repos.append(repo)
+
+    if skipped_repos:
+        console.print(f"[yellow]Skipping {len(skipped_repos)} unavailable repositories[/]")
+
     trash_dir = os.path.join(templates_dir, "TRASH")
     os.makedirs(trash_dir, exist_ok=True)
+
+    success_repos: list[str] = []
     failed_repos: list[str] = []
 
     progress_columns = [
@@ -87,13 +109,19 @@ def clone_repositories(file_url: str, templates_dir: str, max_workers: int = 6) 
     ]
 
     with Progress(*progress_columns, console=console) as progress:
-        task = progress.add_task("Cloning", total=total_repos)
+        task = progress.add_task("Cloning", total=len(accessible_repos))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(clone_repository, repo, trash_dir) for repo in repositories]
+            futures = {
+                executor.submit(clone_repository, repo, trash_dir): repo
+                for repo in accessible_repos
+            }
             for future in as_completed(futures):
+                repo = futures[future]
                 failed_repo = future.result()
                 if failed_repo:
-                    failed_repos.append(failed_repo)
+                    failed_repos.append(repo)
+                else:
+                    success_repos.append(repo)
                 progress.update(task, advance=1)
 
     if failed_repos:
@@ -124,11 +152,13 @@ def clone_repositories(file_url: str, templates_dir: str, max_workers: int = 6) 
                             f"[red]Failed to copy {file}: {exc.strerror or exc}[/]"
                         )
                     shutil.rmtree(trash_dir, ignore_errors=True)
-                    return
+                    return success_repos, skipped_repos, failed_repos
 
     console.print("\n[green]Removing caches and temporary files[/]")
     shutil.rmtree(trash_dir, ignore_errors=True)
     time.sleep(1)
+
+    return success_repos, skipped_repos, failed_repos
 
 
 def extract_cve_year(file_name: str) -> str | None:
@@ -184,14 +214,34 @@ def main() -> None:
         default="Templates",
         help="Directory to store collected templates.",
     )
+    parser.add_argument(
+        "--save-success-list",
+        metavar="PATH",
+        help="Save successfully cloned repository URLs to this file.",
+    )
     args = parser.parse_args()
 
     banner()
     templates_dir = os.path.abspath(args.output_dir)
     os.makedirs(templates_dir, exist_ok=True)
 
-    clone_repositories(args.repo_list_url, templates_dir)
+    success_repos, skipped_repos, failed_repos = clone_repositories(
+        args.repo_list_url, templates_dir
+    )
     summarize_templates(templates_dir)
+
+    if args.save_success_list:
+        success_path = os.path.abspath(args.save_success_list)
+        with open(success_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(success_repos))
+        console.print(f"[green]Successful repositories saved to [bold]{success_path}[/]")
+
+    console.print("\n[bold]Repository statistics[/]")
+    stats_table = Table(show_header=False)
+    stats_table.add_row("Successful", str(len(success_repos)))
+    stats_table.add_row("Skipped", str(len(skipped_repos)))
+    stats_table.add_row("Failed", str(len(failed_repos)))
+    console.print(stats_table)
 
 
 if __name__ == "__main__":

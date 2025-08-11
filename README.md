@@ -32,10 +32,14 @@ python AllForOne.py --repo-list-url <url> --output-dir <directory>
      `https://raw.githubusercontent.com/AggressiveUser/AllForOne/main/PleaseUpdateMe.txt`
    - `--output-dir` *(optional)* directory where the collected templates will be
      stored. Defaults to `Templates`
+   - `--save-success-list` *(optional)* path to save successfully cloned
+     repositories for later reuse
 
 4.  Sit back and relax! The script will start collecting the Nuclei templates
     from public repositories and present progress and summaries using a
-    colourful terminal interface.
+    colourful terminal interface. Unreachable repositories are skipped before
+    cloning and the final report shows counts of successful, skipped and failed
+    clones.
  <img src="https://i.ibb.co/hCh6vXB/image.png" width=500/>
 
 > **Note:** ensure that you have sufficient free disk space before running the
