@@ -1,62 +1,64 @@
-# AllForOne – جامع قوالب Nuclei
+# AllForOne – Nuclei Template Collector
 
-**AllForOne** أداة سطر أوامر تجمع قوالب [Nuclei](https://github.com/projectdiscovery/nuclei) من عشرات المستودعات العامة وتضعها في مكانٍ واحدٍ منظم. تم تصميمها لتخدم صائدي الثغرات والمهتمين بالأمن بحيث تحصل على أحدث القوالب بعملية واحدة واضحة.
+AllForOne is a command-line utility that gathers [Nuclei](https://github.com/projectdiscovery/nuclei) templates from many public repositories into a single organized folder. It is aimed at security researchers and bug bounty hunters who want the latest templates in one run.
 
-## المزايا
-- اكتشاف تلقائي لأكبر قسم تخزين قابل للكتابة واستخدامه للكاش والملفات المؤقتة.
-- تنزيل انتقائي للقوالب باستخدام `git`, أو واجهة GitHub API أو ملفات ZIP عند الحاجة.
-- إزالة التكرار بالاعتماد على بصمة المحتوى (SHA‑1) والروابط الصلبة للحفاظ على المساحة.
-- استئناف تلقائي بعد الانقطاع وملف سجل مفصل `run.log` لكل تشغيل.
-- إيقاف رحيم عند انخفاض المساحة أو عند ضغط `Ctrl+C` دون ظهور تتبعات أخطاء.
-- واجهة غنية تعتمد مكتبة **rich** تعرض حالة كل مستودع وعدادات فورية للتقدم.
+## Features
+- Automatically finds the largest writable partition and uses it for cache, store, and temporary files.
+- Downloads templates using `git`, the GitHub API, or ZIP archives when needed.
+- Deduplicates files by SHA-1 hash and uses hard links to save disk space.
+- Resumes safely after interruptions and writes a detailed `run.log` for each run.
+- Stops gracefully on low disk space or when Ctrl+C is pressed.
+- Rich terminal interface shows per-repository status and live counters.
 
-## المتطلبات
-- Python 3.10 أو أحدث.
-- تثبيت المتطلبات:
+## Requirements
+- Python 3.10 or newer.
+- Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## طريقة الاستخدام
-1. استنسخ المشروع أو نزّله:
+## Usage
+1. Clone the project:
 
 ```bash
 git clone https://github.com/AggressiveUser/AllForOne.git
 cd AllForOne
 ```
 
-2. شغِّل الأداة مباشرةً (الوضع الافتراضي ينفّذ الإعدادات الذكية):
+2. Run with sensible defaults:
 
 ```bash
 python AllForOne.py
 ```
 
-3. للاطلاع على جميع الخيارات المتاحة:
+3. Display help:
 
 ```bash
 python AllForOne.py -h
 ```
 
-### أبرز الخيارات
-- `--repo-list-url <url>` لاستخدام قائمة مستودعات مخصَّصة.
-- `--output-dir <dir>` تحديد مجلد الإخراج (الافتراضي `Templates`).
-- `--save-success-list <file>` حفظ المستودعات التي نُسخت بنجاح في ملف نصي.
-- `--save-templates <archive.zip>` إنشاء أرشيف مضغوط للقوالب النهائية.
-- `--setup` تشغيل معالج الإعداد التفاعلي من جديد.
-- `--yes` تشغيل غير تفاعلي مع قبول القيم الافتراضية.
+### Options
+- `--repo-list-url <url>` – URL to a text file containing repository URLs (one per line).
+- `--output-dir <dir>` – Directory where templates and metadata will be stored (default: `Templates`).
+- `--temp-dir <dir>` – Directory for cache, store, and temporary files (overrides automatic mount selection).
+- `--save-success-list <file>` – Write successfully cloned repository URLs to a text file.
+- `--save-templates <archive.zip>` – Create a zip archive of all collected templates.
+- `--setup` – Launch the interactive setup wizard again.
+- `--reset-config` – Ignore the saved configuration for this run.
+- `--yes` – Assume defaults and run non-interactively.
 
-## ما ينتجه البرنامج
-بعد اكتمال التشغيل ستجد:
-- مجلد `Templates/` يحتوي القوالب مصنّفة حسب السنة (`CVE-YYYY`) أو في مجلد `Vulnerability-Templates/` للأنواع الأخرى.
-- ملف `manifest.json` يُسجّل حالة كل مستودع (محدث، متخطّى، فشل...).
-- ملف `content-index.json` يحوي خريطة SHA‑1 لكل قالب ومصدره.
-- ملف سجل مفصل `run.log` للتشخيص.
+## Output
+After a run you will find:
 
-## ملاحظات
-- يُنصح بتوفير مساحة قرص كافية؛ الأداة تتحقق من المساحة المتاحة وتوقف التشغيل برفق إن اقتربت من النفاد.
-- يمكن استئناف التشغيل بإعادة تنفيذ الأمر نفسه؛ ستُتخطى المستودعات التي جُمعت سابقًا بنجاح.
+- `Templates/` – Collected templates organized by year (`CVE-YYYY`) or in `Vulnerability-Templates/` for other types.
+- `manifest.json` – Status of each repository (updated, skipped, failed, etc.).
+- `content-index.json` – Mapping from SHA-1 hash to paths and sources.
+- `run.log` – Detailed log with timestamps for troubleshooting.
 
-## الرخصة
-هذا المشروع مرخَّص تحت رخصة [MIT](LICENSE).
+## Notes
+- Ensure enough disk space; the tool checks free space and stops gracefully when low.
+- Re-running the tool skips repositories that were processed successfully.
 
+## License
+This project is licensed under the [MIT](LICENSE) license.

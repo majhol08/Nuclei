@@ -831,7 +831,7 @@ def request_cancel(signum, frame) -> None:
         CANCEL_REQUESTED = True
         logging.getLogger("collector").info("Cancellation requested by user")
         console.print(
-            "[yellow]تم طلب الإلغاء… جاري التنظيف وكتابة الملخّص. يمكنك إعادة التشغيل للاستئناف.[/]"
+            "[yellow]Cancellation requested… cleaning up and writing the summary. You can rerun to resume.[/]"
         )
 
 
@@ -1246,31 +1246,31 @@ def main() -> None:
     parser.add_argument(
         "--repo-list-url",
         default="https://raw.githubusercontent.com/AggressiveUser/AllForOne/main/PleaseUpdateMe.txt",
-        help="URL pointing to list of repositories.",
+        help="URL to a text file of repository links, one per line.",
     )
     parser.add_argument(
         "--output-dir",
         default="Templates",
-        help="Directory to store collected templates.",
+        help="Directory where templates and metadata will be stored.",
     )
     parser.add_argument(
         "--temp-dir",
-        help="Use this directory for cache/store/tmp instead of auto selection.",
+        help="Directory to use for cache, store, and temp files (overrides auto selection).",
     )
     parser.add_argument(
         "--save-success-list",
         metavar="PATH",
-        help="Save successfully cloned repository URLs to this file.",
+        help="Write successfully cloned repository URLs to PATH.",
     )
     parser.add_argument(
         "--save-templates",
         metavar="PATH",
-        help="Save collected templates as a zip archive at PATH.",
+        help="Create a zip archive of collected templates at PATH.",
     )
     parser.add_argument(
         "--setup",
         action="store_true",
-        help="Run initial setup wizard.",
+        help="Run the interactive setup wizard.",
     )
     parser.add_argument(
         "--reset-config",
@@ -1429,7 +1429,7 @@ def main() -> None:
 
     if CANCEL_REQUESTED:
         console.print("[bold red]Goodbye[/]")
-        wait_countdown(2, "تنظيف…", STATE_SPINNERS["cleanup"])
+        wait_countdown(2, "Cleaning…", STATE_SPINNERS["cleanup"])
     else:
         show_confetti()
 
