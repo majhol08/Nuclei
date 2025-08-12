@@ -139,38 +139,38 @@ def check_free_space(paths: list[str], threshold: int = 150 * 1024 * 1024) -> tu
 
 
 def find_best_mount(threshold: int = 512 * 1024 * 1024) -> str | None:
-    """Return writable mount point with most free space above ``threshold``."""
+    """Return writable mount point with most free space via ``df``."""
+
+    try:
+        out = subprocess.check_output(["df", "-PkT"], text=True).splitlines()
+    except Exception:
+        return None
 
     candidates: list[tuple[int, str]] = []
-    try:
-        with open("/proc/mounts", "r", encoding="utf-8") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                _dev, mount, fstype = parts[:3]
-                if fstype.startswith("proc") or fstype in {
-                    "sysfs",
-                    "cgroup",
-                    "cgroup2",
-                    "overlay",
-                    "squashfs",
-                    "tmpfs",
-                    "devtmpfs",
-                    "nsfs",
-                }:
-                    continue
-                if not os.path.isdir(mount) or not os.access(mount, os.W_OK):
-                    continue
-                try:
-                    usage = shutil.disk_usage(mount)
-                except OSError:
-                    continue
-                if usage.free < threshold:
-                    continue
-                candidates.append((usage.free, mount))
-    except OSError:
-        return None
+    for line in out[1:]:
+        parts = line.split()
+        if len(parts) < 7:
+            continue
+        fstype = parts[1]
+        avail = int(parts[4]) * 1024  # available in bytes
+        mount = parts[6]
+        if fstype in {
+            "proc",
+            "sysfs",
+            "cgroup",
+            "cgroup2",
+            "overlay",
+            "squashfs",
+            "tmpfs",
+            "devtmpfs",
+            "nsfs",
+        }:
+            continue
+        if avail < threshold:
+            continue
+        if not os.path.isdir(mount) or not os.access(mount, os.W_OK):
+            continue
+        candidates.append((avail, mount))
 
     if not candidates:
         return None
@@ -212,7 +212,9 @@ def ensure_symlink(link: str, target: str, logger: logging.Logger) -> None:
         os.makedirs(link, exist_ok=True)
 
 
-def setup_storage(templates_dir: str, logger: logging.Logger) -> tuple[str, str, str, str]:
+def setup_storage(
+    templates_dir: str, logger: logging.Logger, temp_dir: str | None
+) -> tuple[str, str, str, str]:
     """Configure cache, store and tmp locations, returning paths.
 
     Returns ``(cache_dir, store_dir, tmp_dir, storage_root)`` where ``cache_dir``
@@ -224,22 +226,20 @@ def setup_storage(templates_dir: str, logger: logging.Logger) -> tuple[str, str,
     env_store = os.environ.get("AFO_STORE_DIR")
     env_tmp = os.environ.get("AFO_TMPDIR")
 
-    best_mount = find_best_mount()
-    if not (env_cache or env_store or env_tmp):
-        if best_mount and os.path.abspath(best_mount) != os.path.abspath(templates_dir):
-            free_gb = shutil.disk_usage(best_mount).free / (1024 ** 3)
-            console.print(
-                f"Using BEST_MOUNT for cache/store/tmp: {best_mount} (free: {free_gb:.1f} GB)"
-            )
-        else:
-            console.print("No large writable mount found, falling back to OUTPUT_DIR")
-            best_mount = templates_dir
-    else:
-        best_mount = env_cache or env_store or env_tmp or templates_dir
+    base_dir = env_cache or env_store or env_tmp or temp_dir or find_best_mount()
 
-    cache_target = env_cache or os.path.join(best_mount, "afo", "cache")
-    store_target = env_store or os.path.join(best_mount, "afo", "store")
-    tmp_target = env_tmp or os.path.join(best_mount, "afo", "tmp")
+    if not base_dir:
+        console.print("No large writable mount found, falling back to OUTPUT_DIR")
+        base_dir = templates_dir
+    elif os.path.abspath(base_dir) != os.path.abspath(templates_dir):
+        free_gb = shutil.disk_usage(base_dir).free / (1024 ** 3)
+        console.print(
+            f"Using BEST_MOUNT for cache/store/tmp: {base_dir} (free: {free_gb:.1f} GB)"
+        )
+
+    cache_target = env_cache or os.path.join(base_dir, "afo", "cache")
+    store_target = env_store or os.path.join(base_dir, "afo", "store")
+    tmp_target = env_tmp or os.path.join(base_dir, "afo", "tmp")
 
     ensure_symlink(os.path.join(templates_dir, ".cache"), cache_target, logger)
     ensure_symlink(os.path.join(templates_dir, ".store"), store_target, logger)
@@ -776,6 +776,10 @@ def main() -> None:
         help="Directory to store collected templates.",
     )
     parser.add_argument(
+        "--temp-dir",
+        help="Use this directory for cache/store/tmp instead of auto selection.",
+    )
+    parser.add_argument(
         "--save-success-list",
         metavar="PATH",
         help="Save successfully cloned repository URLs to this file.",
@@ -828,7 +832,9 @@ def main() -> None:
     else:
         url_registry = {}
 
-    cache_dir, store_dir, tmp_dir, storage_root = setup_storage(templates_dir, logger)
+    cache_dir, store_dir, tmp_dir, storage_root = setup_storage(
+        templates_dir, logger, args.temp_dir
+    )
 
     counters = {"added": 0, "updated": 0}
 

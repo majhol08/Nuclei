@@ -34,6 +34,8 @@ python AllForOne.py --repo-list-url <url> --output-dir <directory>
      stored. Defaults to `Templates`
    - `--save-success-list` *(optional)* path to save successfully cloned
     repositories for later reuse
+   - `--temp-dir` *(optional)* directory used for cache and temp data; by default
+     the script auto-selects the largest writable mount
 
 4.  Sit back and watch an animated dashboard. A single interactive screen keeps
     at most a handful of lines, one per active repository. Each phase uses a
@@ -56,8 +58,8 @@ At startup the collector scans all writable mounts and automatically selects
 the one with the most free space. The `.cache` and `.store` directories inside
 `Templates/` become symlinks pointing to that mount so cached repositories and
 deduplicated blobs live off the main output partition. Override this behaviour
-with the environment variables `AFO_CACHE_DIR`, `AFO_STORE_DIR` and
-`AFO_TMPDIR` if you need custom locations.
+with the `--temp-dir` option or the environment variables `AFO_CACHE_DIR`,
+`AFO_STORE_DIR` and `AFO_TMPDIR` if you need custom locations.
 
 Each copy uses SHA‑1 deduplication: identical YAML files are written once and
 tracked in `content-index.json`. The `manifest.json` remembers the last commit
