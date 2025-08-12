@@ -20,31 +20,44 @@ from hashlib import sha1
 from urllib.parse import urlparse
 
 import requests
-from rich.console import Console, Group
-from rich.live import Live
-from rich.progress import (
-    BarColumn,
-    Progress,
-    TextColumn,
-    TimeRemainingColumn,
-    ProgressColumn,
-)
-from rich.spinner import Spinner
-from rich.table import Table
-from rich.panel import Panel
-from rich.prompt import Confirm, Prompt
+
+try:
+    from rich.console import Console, Group
+    from rich.live import Live
+    from rich.progress import (
+        BarColumn,
+        Progress,
+        TextColumn,
+        TimeRemainingColumn,
+        ProgressColumn,
+    )
+    from rich.spinner import Spinner
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.prompt import Confirm, Prompt
+except ImportError:  # pragma: no cover - rich is optional for basic CLI help
+    Console = Group = Live = Progress = TextColumn = TimeRemainingColumn = BarColumn = ProgressColumn = Spinner = Table = Panel = Confirm = Prompt = None
 
 
-console = Console()
+class _SimpleConsole:
+    def print(self, *args, **kwargs):
+        print(*args)
+
+
+console = Console() if Console is not None else _SimpleConsole()
 CANCEL_REQUESTED = False
 
 
-class AnimatedSpinnerColumn(ProgressColumn):
-    """Progress column that shows a configurable spinner per task."""
+if ProgressColumn is not None and Spinner is not None:
+    class AnimatedSpinnerColumn(ProgressColumn):
+        """Progress column that shows a configurable spinner per task."""
 
-    def render(self, task):
-        name = task.fields.get("spinner", "dots")
-        return Spinner(name)
+        def render(self, task):
+            name = task.fields.get("spinner", "dots")
+            return Spinner(name)
+else:  # rich unavailable
+    class AnimatedSpinnerColumn:
+        pass
 
 
 STATE_SPINNERS = {
