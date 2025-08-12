@@ -1,34 +1,53 @@
-"""Nuclei template collector.
-
-This script fetches a list of template repositories, clones them concurrently
-and organises the templates by CVE year.  A small command line interface built
-with ``argparse`` and ``rich`` provides a colourful and user friendly
-experience.
-"""
+"""Nuclei template collector with rich progress and logging."""
 
 from __future__ import annotations
 
 import argparse
 import glob
+import logging
 import os
 import shutil
 import subprocess
 import time
 import errno
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from rich.console import Console
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
+from rich.logging import RichHandler
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
 from rich.table import Table
 
 
 console = Console()
 
 
+def setup_logger(log_path: str) -> logging.Logger:
+    """Create a logger printing to console and writing to ``log_path``."""
+
+    logger = logging.getLogger("collector")
+    logger.setLevel(logging.INFO)
+
+    rich_handler = RichHandler(console=console, show_level=False, markup=True)
+    rich_handler.setFormatter(logging.Formatter("%(message)s"))
+
+    file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S")
+    )
+
+    logger.addHandler(rich_handler)
+    logger.addHandler(file_handler)
+    return logger
+
+
 def git_clone(url: str, destination: str) -> tuple[int, str]:
-    """Clone a git repository to ``destination`` and return result code and
-    stderr."""
+    """Clone a git repository to ``destination`` and return result code and stderr."""
 
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -41,124 +60,13 @@ def git_clone(url: str, destination: str) -> tuple[int, str]:
     return result.returncode, result.stderr.decode().strip()
 
 
-def generate_destination_folder(url: str, trash_dir: str) -> str:
-    """Generate a unique folder name for the repository under ``trash_dir``."""
-
-    folder_name = os.path.basename(url.rstrip(".git"))
+def generate_destination_folder(url: str, base_dir: str) -> str:
+    folder_name = os.path.basename(url.rstrip("/"))
     counter = 1
-    while os.path.exists(os.path.join(trash_dir, folder_name)):
-        folder_name = f"{os.path.basename(url.rstrip('.git'))}_{counter}"
+    while os.path.exists(os.path.join(base_dir, folder_name)):
+        folder_name = f"{os.path.basename(url.rstrip('/'))}_{counter}"
         counter += 1
     return folder_name
-
-
-def clone_repository(repo: str, trash_dir: str) -> str | None:
-    """Clone a single repository and return the repo URL on failure."""
-
-    destination = generate_destination_folder(repo, trash_dir)
-    return_code, error_msg = git_clone(repo, os.path.join(trash_dir, destination))
-    if return_code != 0 or "Username for" in error_msg:
-        return repo
-    return None
-
-
-def clone_repositories(
-    file_url: str,
-    templates_dir: str,
-    max_workers: int = 6,
-) -> tuple[list[str], list[str], list[str]]:
-    """Clone all repositories listed at ``file_url`` into ``templates_dir``.
-
-    Returns lists of successful, skipped and failed repository URLs."""
-
-    console.print(f"[bold]Fetching repository list from:[/] {file_url}")
-    try:
-        response = requests.get(file_url, timeout=30)
-        response.raise_for_status()
-        repositories = [r for r in response.text.strip().split("\n") if r]
-    except requests.RequestException as exc:  # pragma: no cover - network failure
-        console.print(f"[red]Failed to retrieve repository list: {exc}[/]")
-        return [], [], []
-
-    accessible_repos: list[str] = []
-    skipped_repos: list[str] = []
-    for repo in repositories:
-        try:
-            resp = requests.head(repo, allow_redirects=True, timeout=15)
-            if resp.status_code == 404:
-                skipped_repos.append(repo)
-            else:
-                accessible_repos.append(repo)
-        except requests.RequestException:
-            skipped_repos.append(repo)
-
-    if skipped_repos:
-        console.print(f"[yellow]Skipping {len(skipped_repos)} unavailable repositories[/]")
-
-    trash_dir = os.path.join(templates_dir, "TRASH")
-    os.makedirs(trash_dir, exist_ok=True)
-
-    success_repos: list[str] = []
-    failed_repos: list[str] = []
-
-    progress_columns = [
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("{task.completed}/{task.total} repos"),
-    ]
-
-    with Progress(*progress_columns, console=console) as progress:
-        task = progress.add_task("Cloning", total=len(accessible_repos))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(clone_repository, repo, trash_dir): repo
-                for repo in accessible_repos
-            }
-            for future in as_completed(futures):
-                repo = futures[future]
-                failed_repo = future.result()
-                if failed_repo:
-                    failed_repos.append(repo)
-                else:
-                    success_repos.append(repo)
-                progress.update(task, advance=1)
-
-    if failed_repos:
-        console.print("[red]Failed to clone the following repositories:[/]")
-        for repo in failed_repos:
-            console.print(f"  - {repo}")
-
-    # Copy templates into final structure
-    for root, _, files in os.walk(trash_dir):
-        for file in files:
-            if file.endswith(".yaml"):
-                source_path = os.path.join(root, file)
-                cve_year = extract_cve_year(file)
-                if cve_year:
-                    destination_folder = os.path.join(templates_dir, f"CVE-{cve_year}")
-                else:
-                    destination_folder = os.path.join(templates_dir, "Vulnerability-Templates")
-                os.makedirs(destination_folder, exist_ok=True)
-                try:
-                    shutil.copy2(source_path, os.path.join(destination_folder, file))
-                except OSError as exc:
-                    if exc.errno == errno.ENOSPC:
-                        console.print(
-                            f"[red]No space left on device while copying {file}. Aborting.[/]"
-                        )
-                    else:
-                        console.print(
-                            f"[red]Failed to copy {file}: {exc.strerror or exc}[/]"
-                        )
-                    shutil.rmtree(trash_dir, ignore_errors=True)
-                    return success_repos, skipped_repos, failed_repos
-
-    console.print("\n[green]Removing caches and temporary files[/]")
-    shutil.rmtree(trash_dir, ignore_errors=True)
-    time.sleep(1)
-
-    return success_repos, skipped_repos, failed_repos
 
 
 def extract_cve_year(file_name: str) -> str | None:
@@ -177,24 +85,161 @@ def count_yaml_files(folder: str) -> int:
 
 
 def summarize_templates(templates_dir: str) -> None:
-    """Print a summary table of collected templates."""
-
     cve_folders = glob.glob(os.path.join(templates_dir, "CVE-*"))
     cve_yaml_count = sum(count_yaml_files(folder) for folder in cve_folders)
 
-    vulnerability_templates_folder = os.path.join(templates_dir, "Vulnerability-Templates")
-    vulnerability_yaml_count = count_yaml_files(vulnerability_templates_folder)
+    vulnerability_folder = os.path.join(templates_dir, "Vulnerability-Templates")
+    vuln_yaml_count = count_yaml_files(vulnerability_folder)
 
-    total_yaml_count = cve_yaml_count + vulnerability_yaml_count
+    total_yaml_count = cve_yaml_count + vuln_yaml_count
 
     table = Table(title="Template Summary")
     table.add_column("Template Type")
     table.add_column("Count", justify="right")
     table.add_row("CVE Templates", str(cve_yaml_count))
-    table.add_row("Other Vulnerability Templates", str(vulnerability_yaml_count))
+    table.add_row("Other Vulnerability Templates", str(vuln_yaml_count))
     table.add_row("Total Templates", str(total_yaml_count))
 
     console.print(table)
+
+
+def clone_repositories(
+    file_url: str,
+    templates_dir: str,
+    logger: logging.Logger,
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """Clone repositories listed at ``file_url`` into ``templates_dir``."""
+
+    logger.info(f"Fetching repository list from: {file_url}")
+    try:
+        response = requests.get(file_url, timeout=30)
+        response.raise_for_status()
+        repositories = [r for r in response.text.strip().split("\n") if r]
+    except requests.RequestException as exc:
+        logger.error(f"Failed to retrieve repository list: {exc}")
+        return [], [], [], []
+
+    accessible_repos: list[str] = []
+    skipped_repos: list[str] = []
+    for repo in repositories:
+        logger.info(f"HEAD {repo}")
+        try:
+            resp = requests.head(repo, allow_redirects=True, timeout=15)
+            logger.info(f"HEAD {repo} -> {resp.status_code}")
+            if resp.status_code == 404:
+                skipped_repos.append(repo)
+            else:
+                accessible_repos.append(repo)
+        except requests.RequestException as exc:
+            logger.warning(f"HEAD {repo} failed: {exc}")
+            skipped_repos.append(repo)
+
+    trash_dir = os.path.join(templates_dir, "TRASH")
+    os.makedirs(trash_dir, exist_ok=True)
+
+    success_repos: list[str] = []
+    failed_repos: list[str] = []
+    zip_fallback: list[str] = []
+
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TimeRemainingColumn(),
+        console=console,
+        transient=True,
+    )
+
+    overall = progress.add_task("Processing", total=len(accessible_repos))
+
+    with progress:
+        for repo in accessible_repos:
+            short_name = repo.split("/")[-1]
+            repo_task = progress.add_task(short_name, total=None)
+            attempt = 1
+            destination = os.path.join(trash_dir, generate_destination_folder(repo, trash_dir))
+            cloned = False
+            while attempt <= 2 and not cloned:
+                logger.info(f"Clone attempt #{attempt} {repo}")
+                progress.update(repo_task, description=f"{short_name} clone #{attempt}")
+                return_code, error = git_clone(repo, destination)
+                if return_code == 0:
+                    logger.info(f"Clone success {repo}")
+                    cloned = True
+                    break
+                logger.warning(f"Clone failed {repo}: {error}")
+                attempt += 1
+                if attempt <= 2:
+                    logger.info(f"Retrying {repo} in 3s")
+                    time.sleep(3)
+
+            if not cloned:
+                logger.info(f"Falling back to zip for {repo}")
+                progress.update(repo_task, description=f"{short_name} zip")
+                zip_url = f"{repo}/archive/refs/heads/main.zip"
+                alt_zip_url = f"{repo}/archive/refs/heads/master.zip"
+                for url in (zip_url, alt_zip_url):
+                    try:
+                        with requests.get(url, stream=True, timeout=30) as r:
+                            r.raise_for_status()
+                            total = int(r.headers.get("Content-Length", 0))
+                            zip_task = progress.add_task(
+                                f"{short_name} download", total=total if total else None
+                            )
+                            zip_path = destination + ".zip"
+                            with open(zip_path, "wb") as f:
+                                for chunk in r.iter_content(chunk_size=8192):
+                                    f.write(chunk)
+                                    progress.advance(zip_task, len(chunk))
+                            progress.remove_task(zip_task)
+                        shutil.unpack_archive(zip_path, destination)
+                        os.remove(zip_path)
+                        zip_fallback.append(repo)
+                        cloned = True
+                        logger.info(f"ZIP fallback success {repo}")
+                        break
+                    except requests.RequestException as exc:
+                        logger.warning(f"ZIP download failed {url}: {exc}")
+                    except (shutil.ReadError, FileNotFoundError) as exc:
+                        logger.warning(f"ZIP extract failed {repo}: {exc}")
+
+            if not cloned:
+                failed_repos.append(repo)
+                progress.remove_task(repo_task)
+                progress.advance(overall)
+                continue
+
+            copied = 0
+            for root, _, files in os.walk(destination):
+                for file in files:
+                    if file.endswith(".yaml"):
+                        source_path = os.path.join(root, file)
+                        cve_year = extract_cve_year(file)
+                        if cve_year:
+                            dest_folder = os.path.join(templates_dir, f"CVE-{cve_year}")
+                        else:
+                            dest_folder = os.path.join(templates_dir, "Vulnerability-Templates")
+                        os.makedirs(dest_folder, exist_ok=True)
+                        try:
+                            shutil.copy2(source_path, os.path.join(dest_folder, file))
+                            copied += 1
+                        except OSError as exc:
+                            if exc.errno == errno.ENOSPC:
+                                logger.error(
+                                    f"No space left on device while copying {file}. Aborting."
+                                )
+                            else:
+                                logger.error(f"Failed to copy {file}: {exc.strerror or exc}")
+                            shutil.rmtree(trash_dir, ignore_errors=True)
+                            return success_repos, skipped_repos, failed_repos, zip_fallback
+            logger.info(f"Copied {copied} templates from {repo}")
+            success_repos.append(repo)
+            shutil.rmtree(destination, ignore_errors=True)
+            progress.remove_task(repo_task)
+            progress.advance(overall)
+
+    shutil.rmtree(trash_dir, ignore_errors=True)
+    return success_repos, skipped_repos, failed_repos, zip_fallback
 
 
 def banner() -> None:
@@ -203,7 +248,8 @@ def banner() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Collect Nuclei templates from public repositories.")
+        description="Collect Nuclei templates from public repositories."
+    )
     parser.add_argument(
         "--repo-list-url",
         default="https://raw.githubusercontent.com/AggressiveUser/AllForOne/main/PleaseUpdateMe.txt",
@@ -225,8 +271,11 @@ def main() -> None:
     templates_dir = os.path.abspath(args.output_dir)
     os.makedirs(templates_dir, exist_ok=True)
 
-    success_repos, skipped_repos, failed_repos = clone_repositories(
-        args.repo_list_url, templates_dir
+    log_path = os.path.join(templates_dir, "run.log")
+    logger = setup_logger(log_path)
+
+    success_repos, skipped_repos, failed_repos, zip_used = clone_repositories(
+        args.repo_list_url, templates_dir, logger
     )
     summarize_templates(templates_dir)
 
@@ -235,12 +284,18 @@ def main() -> None:
         with open(success_path, "w", encoding="utf-8") as f:
             f.write("\n".join(success_repos))
         console.print(f"[green]Successful repositories saved to [bold]{success_path}[/]")
+    else:
+        success_path = None
 
     console.print("\n[bold]Repository statistics[/]")
     stats_table = Table(show_header=False)
     stats_table.add_row("Successful", str(len(success_repos)))
     stats_table.add_row("Skipped", str(len(skipped_repos)))
     stats_table.add_row("Failed", str(len(failed_repos)))
+    stats_table.add_row("ZIP Fallback", str(len(zip_used)))
+    stats_table.add_row("run.log", log_path)
+    if success_path:
+        stats_table.add_row("success list", success_path)
     console.print(stats_table)
 
 
