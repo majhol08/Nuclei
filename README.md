@@ -42,6 +42,7 @@ python MX8_TMPLT.py -h
 - `--repo-list-url <url>` – URL to a text file containing repository URLs (one per line).
 - `--output-dir <dir>` – Directory where templates and metadata will be stored (default: `Templates`).
 - `--temp-dir <dir>` – Directory for cache, store, and temporary files (overrides automatic mount selection).
+- `--search <term>` – Search collected templates for a keyword and exit.
 - `--save-success-list <file>` – Write successfully cloned repository URLs to a text file.
 - `--save-templates <archive.zip>` – Create a zip archive of all collected templates.
 - `--setup` – Launch the interactive setup wizard again.

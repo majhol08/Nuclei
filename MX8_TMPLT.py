@@ -123,6 +123,8 @@ def extract_metadata(path: str) -> dict:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
+            if not isinstance(data, dict):
+                data = {}
     except Exception:
         data = {}
     protocols = [p for p in (
@@ -157,6 +159,47 @@ def extract_metadata(path: str) -> dict:
         "cve": cve,
         "slug": slug,
     }
+
+
+def search_templates(term: str, templates_dir: str) -> None:
+    """Search collected templates using ``content-index.json``."""
+    index_path = os.path.join(templates_dir, "content-index.json")
+    if not os.path.exists(index_path):
+        console.print("content-index.json not found; run the collector first")
+        return
+    try:
+        with open(index_path, "r", encoding="utf-8") as f:
+            index = json.load(f)
+    except Exception:
+        console.print("failed to read content-index.json")
+        return
+    term = term.lower()
+    results = []
+    for meta in index.values():
+        paths = meta.get("paths", [])
+        fields = [
+            meta.get("severity", ""),
+            meta.get("protocol", ""),
+            meta.get("vendor", ""),
+            meta.get("product", ""),
+            meta.get("cve", ""),
+        ] + meta.get("tags", []) + paths
+        blob = " ".join(str(f).lower() for f in fields)
+        if term in blob:
+            results.append(
+                [paths[0] if paths else "", meta.get("severity", ""), ",".join(meta.get("tags", [])), meta.get("cve", "")]
+            )
+    if not results:
+        console.print("no matches found")
+        return
+    if Table is not None:
+        table = Table("Path", "Severity", "Tags", "CVE")
+        for row in results:
+            table.add_row(*row)
+        console.print(table)
+    else:
+        for row in results:
+            console.print(" | ".join(row))
 
 
 def store_path(store_dir: str, hash_val: str) -> str:
@@ -1289,6 +1332,11 @@ def main() -> None:
         help="Directory to use for cache, store, and temp files (overrides auto selection).",
     )
     parser.add_argument(
+        "--search",
+        metavar="TERM",
+        help="Search collected templates by keyword and exit.",
+    )
+    parser.add_argument(
         "--save-success-list",
         metavar="PATH",
         help="Write successfully cloned repository URLs to PATH.",
@@ -1314,6 +1362,11 @@ def main() -> None:
         help="Assume defaults and run non-interactively.",
     )
     args = parser.parse_args()
+
+    if args.search:
+        templates_dir = os.path.abspath(args.output_dir)
+        search_templates(args.search, templates_dir)
+        return
 
     output_dir, config = run_setup(args)
 
