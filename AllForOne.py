@@ -133,19 +133,22 @@ def parse_size(value: str) -> int | None:
         return None
 
 
-def discover_mounts(threshold: int = 512 * 1024 * 1024) -> list[tuple[int, str]]:
-    """Return sorted list of writable mounts with free space >= ``threshold``."""
+def discover_mounts(threshold: int = 512 * 1024 * 1024) -> list[tuple[int, str, int]]:
+    """Return list of candidate mounts as ``(free_bytes, mount, use_percent)``."""
+
     try:
         out = subprocess.check_output(["df", "-PkT"], text=True).splitlines()
     except Exception:
         return []
-    candidates: list[tuple[int, str]] = []
+
+    candidates: list[tuple[int, str, int]] = []
     for line in out[1:]:
         parts = line.split()
         if len(parts) < 7:
             continue
         fstype = parts[1]
         avail = int(parts[4]) * 1024
+        usep = parts[5]
         mount = parts[6]
         if fstype in {
             "proc",
@@ -159,26 +162,74 @@ def discover_mounts(threshold: int = 512 * 1024 * 1024) -> list[tuple[int, str]]
             "nsfs",
         }:
             continue
+        try:
+            use_val = int(usep.rstrip("%"))
+        except ValueError:
+            use_val = 0
+        if use_val >= 99:
+            continue
         if avail < threshold:
             continue
         if not os.path.isdir(mount) or not os.access(mount, os.W_OK):
             continue
-        candidates.append((avail, mount))
+        candidates.append((avail, mount, use_val))
     candidates.sort(reverse=True)
     return candidates
 
 
-def is_writable(path: str) -> bool:
-    """Return ``True`` if ``path`` is writable."""
+def validate_mount(path: str) -> tuple[bool, str]:
+    """Check that ``path`` resides on a writable filesystem with space and inodes."""
+
+    probe_dir = os.path.join(path, "afo", "probe")
+    probe_file = os.path.join(probe_dir, "._afo_probe.tmp")
+    data = os.urandom(1024 * 1024)
     try:
-        os.makedirs(path, exist_ok=True)
-        test_file = os.path.join(path, ".afo_write_test")
-        with open(test_file, "w") as f:
-            f.write("ok")
-        os.remove(test_file)
-        return True
-    except OSError:
-        return False
+        os.makedirs(probe_dir, exist_ok=True)
+        st = os.statvfs(probe_dir)
+        if st.f_favail == 0:
+            return False, "no inodes"
+        with open(probe_file, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        with open(probe_file, "rb") as f:
+            start = f.read(4096)
+            f.seek(-4096, os.SEEK_END)
+            end = f.read(4096)
+        if start != data[:4096] or end != data[-4096:]:
+            return False, "mismatch"
+        return True, ""
+    except OSError as e:
+        if e.errno == errno.EROFS:
+            reason = "read-only"
+        elif e.errno == errno.ENOSPC:
+            reason = "no space"
+        elif e.errno == errno.EDQUOT:
+            reason = "quota"
+        elif e.errno == errno.EACCES:
+            reason = "permission"
+        else:
+            reason = e.strerror or "error"
+        return False, reason
+    finally:
+        try:
+            if os.path.exists(probe_file):
+                os.remove(probe_file)
+            shutil.rmtree(os.path.join(path, "afo", "probe"), ignore_errors=True)
+        except Exception:
+            pass
+
+
+def mount_point(path: str) -> str:
+    """Return mount point for ``path``."""
+
+    try:
+        out = subprocess.check_output(["df", "-P", path], text=True).splitlines()
+        if len(out) >= 2:
+            return out[1].split()[-1]
+    except Exception:
+        pass
+    return "?"
 
 
 class DiskSpaceError(Exception):
@@ -203,45 +254,6 @@ def check_free_space(paths: list[str], threshold: int = 150 * 1024 * 1024) -> tu
             return False, p
     return True, None
 
-
-def find_best_mount(threshold: int = 512 * 1024 * 1024) -> str | None:
-    """Return writable mount point with most free space via ``df``."""
-
-    try:
-        out = subprocess.check_output(["df", "-PkT"], text=True).splitlines()
-    except Exception:
-        return None
-
-    candidates: list[tuple[int, str]] = []
-    for line in out[1:]:
-        parts = line.split()
-        if len(parts) < 7:
-            continue
-        fstype = parts[1]
-        avail = int(parts[4]) * 1024  # available in bytes
-        mount = parts[6]
-        if fstype in {
-            "proc",
-            "sysfs",
-            "cgroup",
-            "cgroup2",
-            "overlay",
-            "squashfs",
-            "tmpfs",
-            "devtmpfs",
-            "nsfs",
-        }:
-            continue
-        if avail < threshold:
-            continue
-        if not os.path.isdir(mount) or not os.access(mount, os.W_OK):
-            continue
-        candidates.append((avail, mount))
-
-    if not candidates:
-        return None
-    candidates.sort(reverse=True)
-    return candidates[0][1]
 
 
 def ensure_symlink(link: str, target: str, logger: logging.Logger) -> None:
@@ -299,6 +311,20 @@ def run_setup(args) -> tuple[str, dict]:
 
     output_dir = os.path.abspath(os.path.expanduser(output_dir))
     os.makedirs(output_dir, exist_ok=True)
+    ok, reason = validate_mount(output_dir)
+    while not ok:
+        if not interactive:
+            console.print(f"[red]{output_dir}: {reason}[/]")
+            raise SystemExit(1)
+        console.print(f"[red]{output_dir}: {reason}[/]")
+        try:
+            output_dir = Prompt.ask("Output directory?", default=default_output)
+        except KeyboardInterrupt:
+            console.print("[red]Setup cancelled[/]")
+            raise SystemExit(1)
+        output_dir = os.path.abspath(os.path.expanduser(output_dir))
+        os.makedirs(output_dir, exist_ok=True)
+        ok, reason = validate_mount(output_dir)
 
     config_path = os.path.join(output_dir, "afo.config.json")
     if not args.setup and not args.reset_config and os.path.exists(config_path):
@@ -307,9 +333,19 @@ def run_setup(args) -> tuple[str, dict]:
         return output_dir, config
 
     candidates = discover_mounts()
+    candidate_info: list[tuple[int, str, bool, str]] = []
+    validated: list[tuple[int, str]] = []
+    skipped_msgs: list[str] = []
+    for avail, mount, _ in candidates:
+        ok, reason = validate_mount(mount)
+        candidate_info.append((avail, mount, ok, reason))
+        if ok:
+            validated.append((avail, mount))
+        else:
+            skipped_msgs.append(f"{mount} ({reason})")
 
     # defaults when prompts are skipped
-    base = candidates[0][1] if candidates else output_dir
+    base = validated[0][1] if validated else output_dir
     cache_dir = os.environ.get("AFO_CACHE_DIR") or os.path.join(base, "afo", "cache")
     store_dir = os.environ.get("AFO_STORE_DIR") or os.path.join(base, "afo", "store")
     tmp_dir = os.environ.get("AFO_TMPDIR") or os.path.join(base, "afo", "tmp")
@@ -319,11 +355,20 @@ def run_setup(args) -> tuple[str, dict]:
 
     if interactive:
         try:
-            if candidates:
-                table = Table("Mount", "Free (GB)")
-                for avail, mount in candidates[:3]:
-                    table.add_row(mount, f"{avail/1024**3:.1f}")
+            if candidate_info:
+                table = Table("Mount", "Free (GB)", "Status")
+                for avail, mount, ok, reason in candidate_info[:3]:
+                    status = "✅ Validated" if ok else f"❌ {reason}"
+                    table.add_row(mount, f"{avail/1024**3:.1f}", status)
                 console.print(table)
+                if skipped_msgs and validated:
+                    console.print(
+                        f"Auto-skipped: {', '.join(skipped_msgs)}. Using: {validated[0][1]} (validated)."
+                    )
+                elif skipped_msgs and not validated:
+                    console.print(
+                        f"Auto-skipped: {', '.join(skipped_msgs)}. No valid mount found; using output directory."
+                    )
 
             if not (
                 os.environ.get("AFO_CACHE_DIR")
@@ -355,8 +400,9 @@ def run_setup(args) -> tuple[str, dict]:
                 tmp_dir = os.path.abspath(tmp_dir)
 
             # validate paths
-            while not is_writable(cache_dir):
-                console.print("[red]Cache path not writable[/]")
+            ok, reason = validate_mount(cache_dir)
+            while not ok:
+                console.print(f"[red]Cache path invalid: {reason}[/]")
                 cache_dir = os.path.abspath(
                     os.path.expanduser(
                         Prompt.ask(
@@ -364,8 +410,10 @@ def run_setup(args) -> tuple[str, dict]:
                         )
                     )
                 )
-            while not is_writable(store_dir):
-                console.print("[red]Store path not writable[/]")
+                ok, reason = validate_mount(cache_dir)
+            ok, reason = validate_mount(store_dir)
+            while not ok:
+                console.print(f"[red]Store path invalid: {reason}[/]")
                 store_dir = os.path.abspath(
                     os.path.expanduser(
                         Prompt.ask(
@@ -373,13 +421,16 @@ def run_setup(args) -> tuple[str, dict]:
                         )
                     )
                 )
-            while not is_writable(tmp_dir):
-                console.print("[red]Temp path not writable[/]")
+                ok, reason = validate_mount(store_dir)
+            ok, reason = validate_mount(tmp_dir)
+            while not ok:
+                console.print(f"[red]Temp path invalid: {reason}[/]")
                 tmp_dir = os.path.abspath(
                     os.path.expanduser(
                         Prompt.ask("Temp dir", default=tempfile.gettempdir())
                     )
                 )
+                ok, reason = validate_mount(tmp_dir)
 
             if (
                 os.path.commonpath([cache_dir, output_dir])
@@ -411,16 +462,20 @@ def run_setup(args) -> tuple[str, dict]:
                 default=True,
             )
 
-            summary = Table(show_header=False)
-            summary.add_row("Output dir", output_dir)
-            summary.add_row("Cache dir", cache_dir)
-            summary.add_row("Store dir", store_dir)
-            summary.add_row("Temp dir", tmp_dir)
+            summary = Table("Target", "Path", "Mount", "Status")
             summary.add_row(
-                "Disk budget",
-                "unlimited" if disk_budget is None else str(disk_budget),
+                "Output",
+                output_dir,
+                mount_point(output_dir),
+                "✅",
             )
+            summary.add_row("Cache", cache_dir, mount_point(cache_dir), "✅")
+            summary.add_row("Store", store_dir, mount_point(store_dir), "✅")
+            summary.add_row("Tmp", tmp_dir, mount_point(tmp_dir), "✅")
             console.print(summary)
+            console.print(
+                f"Disk budget: {'unlimited' if disk_budget is None else str(disk_budget)}"
+            )
 
             if Confirm.ask(
                 f"Save these settings to {config_path} for future runs? (Y/n)",
@@ -442,6 +497,15 @@ def run_setup(args) -> tuple[str, dict]:
         except KeyboardInterrupt:
             console.print("[red]Setup cancelled[/]")
             raise SystemExit(1)
+    else:
+        cache_dir = os.path.abspath(cache_dir)
+        store_dir = os.path.abspath(store_dir)
+        tmp_dir = os.path.abspath(tmp_dir)
+        for path, label in [(cache_dir, "cache"), (store_dir, "store"), (tmp_dir, "temp")]:
+            ok, reason = validate_mount(path)
+            if not ok:
+                console.print(f"[red]{label} path invalid: {reason}[/]")
+                raise SystemExit(1)
 
     config = {
         "cache_dir": cache_dir,

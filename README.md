@@ -57,12 +57,14 @@ python AllForOne.py --repo-list-url <url> --output-dir <directory>
 > collector. The script will now stop gracefully if the disk fills up while
 > copying templates.
 
-At startup the collector scans all writable mounts and automatically selects
-the one with the most free space. The `.cache` and `.store` directories inside
-`Templates/` become symlinks pointing to that mount so cached repositories and
-deduplicated blobs live off the main output partition. Override this behaviour
-with the `--temp-dir` option or the environment variables `AFO_CACHE_DIR`,
-`AFO_STORE_DIR` and `AFO_TMPDIR` if you need custom locations.
+At startup the collector scans local mounts, skipping read‑only or nearly full
+filesystems, and writes a 1 MiB probe file to validate each candidate. The
+largest validated mount is used for cache, store and temporary data. `.cache`
+and `.store` inside `Templates/` become symlinks pointing there so cached
+repositories and deduplicated blobs live off the main output partition.
+Override this behaviour with the `--temp-dir` option or the environment
+variables `AFO_CACHE_DIR`, `AFO_STORE_DIR` and `AFO_TMPDIR` if you need custom
+locations.
 
 On first run a short setup wizard appears (unless `--yes` is used) asking for
 the output directory, cache/store locations, optional symlinks and a disk
