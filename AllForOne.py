@@ -93,6 +93,28 @@ def compute_sha1(path: str) -> str:
     return h.hexdigest()
 
 
+def sanitize_segment(segment: str) -> str:
+    """Return a filesystem-safe segment."""
+    allowed = "-_." + ''.join(chr(i) for i in range(ord('a'), ord('z')+1)) + ''.join(chr(i) for i in range(ord('0'), ord('9')+1))
+    segment = segment.lower()
+    return ''.join(c if c in allowed else '-' for c in segment)[:40]
+
+
+def store_path(store_dir: str, hash_val: str) -> str:
+    """Return path in content store for given hash."""
+    sub = os.path.join(store_dir, hash_val[:2])
+    os.makedirs(sub, exist_ok=True)
+    return os.path.join(sub, f"{hash_val}.yaml")
+
+
+def hardlink_or_copy(src: str, dst: str) -> None:
+    """Create a hard link if possible else copy."""
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
 def ensure_disk_space(path: str, threshold: int = 1_000_000_000) -> bool:
     """Return True if free space above threshold (default 1GB)."""
     usage = shutil.disk_usage(path)
@@ -104,50 +126,53 @@ def ensure_disk_space(path: str, threshold: int = 1_000_000_000) -> bool:
 
 def copy_yaml_file(
     source_path: str,
-    dest_folder: str,
+    rel_repo_path: str,
     repo_url: str,
+    commit: str,
+    dest_root: str,
+    store_dir: str,
     content_index: dict,
     index_path: str,
+    url_registry: dict,
     logger: logging.Logger,
 ) -> tuple[bool, bool]:
-    """Copy ``source_path`` into ``dest_folder`` with de-duplication.
+    """Store YAML content by hash and hard-link into destination.
 
-    Returns tuple of (added, updated) booleans.
+    Returns tuple of (added, updated) booleans for the destination tree.
     """
 
-    file = os.path.basename(source_path)
+    basename = os.path.basename(rel_repo_path)
+    owner_repo = "/".join(urlparse(repo_url).path.strip("/").split("/")[:2])
+    owner, repo = owner_repo.split("/")
+    year = extract_cve_year(basename)
+    dest_folder = os.path.join(dest_root, f"CVE-{year}" if year else "Vulnerability-Templates")
     os.makedirs(dest_folder, exist_ok=True)
-    dest_path = os.path.join(dest_folder, file)
-    hash_val = compute_sha1(source_path)
 
-    entry = content_index.get(hash_val)
-    if entry:
-        # content already exists somewhere; skip copying
+    hash_val = compute_sha1(source_path)
+    store_file = store_path(store_dir, hash_val)
+    if not os.path.exists(store_file):
+        tmp_store = store_file + ".part"
+        shutil.copy2(source_path, tmp_store)
+        os.replace(tmp_store, store_file)
+
+    if hash_val in content_index:
+        entry = content_index[hash_val]
         entry[3] = datetime.utcnow().isoformat()
         content_index[hash_val] = entry
         return False, False
 
-    added = False
-    updated = False
+    dest_name = basename
+    dest_path = os.path.join(dest_folder, dest_name)
     if os.path.exists(dest_path):
-        # compare existing file
-        stat_src = os.stat(source_path)
-        stat_dst = os.stat(dest_path)
-        if stat_src.st_size == stat_dst.st_size and int(stat_src.st_mtime) == int(
-            stat_dst.st_mtime
-        ):
-            dst_hash = compute_sha1(dest_path)
-            if dst_hash == hash_val:
-                return False, False
-        tmp_dest = dest_path + ".part"
-        shutil.copy2(source_path, tmp_dest)
-        os.replace(tmp_dest, dest_path)
-        updated = True
-    else:
-        tmp_dest = dest_path + ".part"
-        shutil.copy2(source_path, tmp_dest)
-        os.replace(tmp_dest, dest_path)
-        added = True
+        existing_hash = compute_sha1(dest_path)
+        if existing_hash == hash_val:
+            rel_path = os.path.relpath(dest_path, os.path.dirname(index_path))
+            content_index[hash_val] = [rel_path, repo_url, datetime.utcnow().isoformat(), datetime.utcnow().isoformat()]
+            return False, False
+        dest_name = f"{os.path.splitext(basename)[0]}__from-{sanitize_segment(owner)}-{sanitize_segment(repo)}__{hash_val[:8]}.yaml"
+        dest_path = os.path.join(dest_folder, dest_name)
+
+    hardlink_or_copy(store_file, dest_path)
 
     rel_path = os.path.relpath(dest_path, os.path.dirname(index_path))
     content_index[hash_val] = [
@@ -156,6 +181,20 @@ def copy_yaml_file(
         datetime.utcnow().isoformat(),
         datetime.utcnow().isoformat(),
     ]
+    added = True
+    updated = False
+
+    raw_url = f"{repo_url.replace('github.com', 'raw.githubusercontent.com')}/{commit}/{rel_repo_path.replace(os.sep, '/') }"
+    stat = os.stat(store_file)
+    url_registry[repo_url].append(
+        {
+            "url": raw_url,
+            "size": stat.st_size,
+            "sha1": hash_val,
+            "last_modified": "",
+            "etag": "",
+        }
+    )
 
     return added, updated
 
@@ -280,7 +319,7 @@ def show_confetti(duration: float = 2.0) -> None:
     return
 
 
-def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger: logging.Logger, manifest: dict, content_index: dict, index_path: str, counters: dict) -> tuple[list[str], list[str], list[str]]:
+def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger: logging.Logger, manifest: dict, content_index: dict, index_path: str, counters: dict, url_registry: dict, store_dir: str) -> tuple[list[str], list[str], list[str]]:
     """Fetch repositories and update templates incrementally."""
     global CANCEL_REQUESTED
     logger.info(f"Fetching repository list from: {file_url}")
@@ -362,25 +401,36 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
             if not ensure_disk_space(templates_dir):
                 CANCEL_REQUESTED = True
                 break
+            try:
+                last_commit = subprocess.check_output(["git", "-C", cache, "rev-parse", "HEAD"]).decode().strip()
+            except subprocess.SubprocessError:
+                last_commit = ""
             repo_prog.update(t, description=f"{name} copy", spinner=STATE_SPINNERS["copy"])
+            url_registry[repo] = []
             add = upd = 0
             for root, _, files in os.walk(cache):
                 for f in files:
                     if f.endswith(".yaml"):
                         src = os.path.join(root, f)
-                        year = extract_cve_year(f)
-                        dest = os.path.join(templates_dir, f"CVE-{year}" if year else "Vulnerability-Templates")
-                        a2, u2 = copy_yaml_file(src, dest, repo, content_index, index_path, logger)
+                        rel_repo_path = os.path.relpath(src, cache)
+                        a2, u2 = copy_yaml_file(
+                            src,
+                            rel_repo_path,
+                            repo,
+                            last_commit,
+                            templates_dir,
+                            store_dir,
+                            content_index,
+                            index_path,
+                            url_registry,
+                            logger,
+                        )
                         if a2:
                             add += 1
                             counters["added"] += 1
                         if u2:
                             upd += 1
                             counters["updated"] += 1
-            try:
-                last_commit = subprocess.check_output(["git", "-C", cache, "rev-parse", "HEAD"]).decode().strip()
-            except subprocess.SubprocessError:
-                last_commit = ""
             if add == 0 and upd == 0:
                 repo_prog.update(t, description=f"{name} {STATUS_ICONS['up_to_date']}", total=1, completed=1, spinner=STATE_SPINNERS["done"])
                 succ.append(repo)
@@ -448,8 +498,17 @@ def main() -> None:
     else:
         content_index = {}
 
+    url_registry_path = os.path.join(templates_dir, "url-registry.json")
+    if os.path.exists(url_registry_path):
+        with open(url_registry_path, "r", encoding="utf-8") as f:
+            url_registry = json.load(f)
+    else:
+        url_registry = {}
+
     cache_dir = os.path.join(templates_dir, ".cache", "repos")
     os.makedirs(cache_dir, exist_ok=True)
+    store_dir = os.path.join(templates_dir, ".store")
+    os.makedirs(store_dir, exist_ok=True)
 
     counters = {"added": 0, "updated": 0}
 
@@ -467,6 +526,8 @@ def main() -> None:
             content_index,
             index_path,
             counters,
+            url_registry,
+            store_dir,
         )
         summarize_templates(templates_dir)
     finally:
@@ -474,6 +535,8 @@ def main() -> None:
             json.dump(manifest, f, indent=2)
         with open(index_path, "w", encoding="utf-8") as f:
             json.dump(content_index, f, indent=2)
+        with open(url_registry_path, "w", encoding="utf-8") as f:
+            json.dump(url_registry, f, indent=2)
         cleanup_temp(templates_dir)
 
     if CANCEL_REQUESTED:
@@ -504,6 +567,7 @@ def main() -> None:
     stats_table.add_row("run.log", log_path)
     stats_table.add_row("manifest", manifest_path)
     stats_table.add_row("content-index", index_path)
+    stats_table.add_row("url-registry", url_registry_path)
     if success_path:
         stats_table.add_row("success list", success_path)
     console.print(stats_table)

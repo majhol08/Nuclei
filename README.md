@@ -55,7 +55,10 @@ python AllForOne.py --repo-list-url <url> --output-dir <directory>
 Each copy uses SHA‑1 deduplication: identical YAML files are written once and
 tracked in `content-index.json`. The `manifest.json` remembers the last commit
 or check time for every repository so reruns avoid reprocessing unchanged
-sources.
+sources. A shared `.store` directory keeps a single copy of each unique
+template addressed by its hash; project folders receive hard links pointing to
+that content. The accompanying `url-registry.json` lists every raw YAML URL
+fetched along with its size and hash for auditing.
 
 Press `Ctrl+C` to cancel at any time. The collector will finish the file in
 progress, clean temporary data, write a summary to `run.log` and
