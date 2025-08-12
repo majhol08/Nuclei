@@ -42,11 +42,17 @@ python AllForOne.py --repo-list-url <url> --output-dir <directory>
     clean. Unreachable repositories are skipped before cloning and the final
     report shows counts of successful, skipped, failed and ZIP-fallback clones
     along with the log path (and success list if requested).
- <img src="https://i.ibb.co/hCh6vXB/image.png" width=500/>
+<img src="https://i.ibb.co/hCh6vXB/image.png" width=500/>
 
 > **Note:** ensure that you have sufficient free disk space before running the
 > collector. The script will now stop gracefully if the disk fills up while
 > copying templates.
+
+Press `Ctrl+C` to cancel at any time. The collector will finish the file in
+progress, clean temporary data, write a summary to `run.log` and
+`manifest.json`, then exit without a traceback. On the next run it reads
+`manifest.json` and automatically skips repositories that were already cloned
+successfully so you can resume where you left off.
 
 ## Result :file_folder:
 
