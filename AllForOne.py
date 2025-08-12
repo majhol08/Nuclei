@@ -12,6 +12,7 @@ import signal
 import subprocess
 import time
 import errno
+import random
 
 import requests
 from rich.console import Console, Group
@@ -19,15 +20,37 @@ from rich.live import Live
 from rich.progress import (
     BarColumn,
     Progress,
-    SpinnerColumn,
     TextColumn,
     TimeRemainingColumn,
+    ProgressColumn,
 )
+from rich.spinner import Spinner
 from rich.table import Table
 
 
 console = Console()
 CANCEL_REQUESTED = False
+
+
+class AnimatedSpinnerColumn(ProgressColumn):
+    """Progress column that shows a configurable spinner per task."""
+
+    def render(self, task):
+        name = task.fields.get("spinner", "dots")
+        return Spinner(name)
+
+
+STATE_SPINNERS = {
+    "head": "dots",  # 🔍
+    "clone": "line",  # ⬇️
+    "retry": "earth",  # ♻️
+    "zip": "toggle",  # 📦
+    "extract": "bouncingBar",  # 📂
+    "copy": "runner",  # 📄
+    "done": "moon",  # ✅
+    "cleanup": "dots",  # 🧹
+    "wait": "clock",  # 💤
+}
 
 
 def request_cancel(signum, frame) -> None:
@@ -103,6 +126,21 @@ def cleanup_temp(templates_dir: str) -> None:
                 os.remove(os.path.join(root, file))
 
 
+def wait_countdown(seconds: int, message: str, spinner: str = "clock") -> None:
+    """Display a countdown with spinner for waits/backoffs."""
+
+    status = console.status(f"{message} {seconds:02d}s", spinner=spinner)
+    status.start()
+    try:
+        for remaining in range(seconds, 0, -1):
+            if CANCEL_REQUESTED:
+                break
+            status.update(f"{message} {remaining:02d}s")
+            time.sleep(1)
+    finally:
+        status.stop()
+
+
 def summarize_templates(templates_dir: str) -> None:
     cve_folders = glob.glob(os.path.join(templates_dir, "CVE-*"))
     cve_yaml_count = sum(count_yaml_files(folder) for folder in cve_folders)
@@ -120,6 +158,17 @@ def summarize_templates(templates_dir: str) -> None:
     table.add_row("Total Templates", str(total_yaml_count))
 
     console.print(table)
+
+
+def show_confetti(duration: float = 2.0) -> None:
+    """Display a simple text confetti animation."""
+
+    colors = ["red", "green", "yellow", "blue", "magenta", "cyan"]
+    end = time.time() + duration
+    while time.time() < end:
+        line = "".join(random.choice(["✨", "🎉", "💥"]) for _ in range(20))
+        console.print(line, style=random.choice(colors))
+        time.sleep(0.1)
 
 
 def clone_repositories(
@@ -148,7 +197,7 @@ def clone_repositories(
     os.makedirs(trash_dir, exist_ok=True)
 
     repo_progress = Progress(
-        SpinnerColumn(),
+        AnimatedSpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         console=console,
@@ -202,11 +251,20 @@ def clone_repositories(
             )
 
             name = repo.split("/")[-1]
-            task = repo_progress.add_task(f"{name} HEAD", total=None)
+            task = repo_progress.add_task(
+                f"{name} HEAD", total=None, spinner=STATE_SPINNERS["head"]
+            )
             logger.info(f"HEAD {repo}")
             try:
                 resp = requests.head(repo, allow_redirects=True, timeout=15)
                 logger.info(f"HEAD {repo} -> {resp.status_code}")
+                if resp.status_code == 429:
+                    repo_progress.update(
+                        task,
+                        description=f"{name} wait",
+                        spinner=STATE_SPINNERS["wait"],
+                    )
+                    wait_countdown(30, "Rate limit, resumes in", STATE_SPINNERS["wait"])
                 if resp.status_code == 404:
                     skipped_repos.append(repo)
                     repo_progress.update(task, description=f"{name} skipped 404", total=1, completed=1)
@@ -254,7 +312,11 @@ def clone_repositories(
                 if CANCEL_REQUESTED:
                     break
                 logger.info(f"Clone attempt #{attempt} {repo}")
-                repo_progress.update(task, description=f"{name} clone #{attempt}")
+                repo_progress.update(
+                    task,
+                    description=f"{name} clone #{attempt}",
+                    spinner=STATE_SPINNERS["clone"],
+                )
                 return_code, error = git_clone(repo, destination)
                 if return_code == 0:
                     logger.info(f"Clone success {repo}")
@@ -263,18 +325,25 @@ def clone_repositories(
                 logger.warning(f"Clone failed {repo}: {error}")
                 attempt += 1
                 if attempt <= 2:
-                    repo_progress.update(task, description=f"{name} retry #{attempt}")
+                    repo_progress.update(
+                        task,
+                        description=f"{name} retry #{attempt}",
+                        spinner=STATE_SPINNERS["retry"],
+                    )
                     logger.info(f"Retrying {repo} in 3s")
-                    for _ in range(3):
-                        if CANCEL_REQUESTED:
-                            break
-                        time.sleep(1)
+                    wait_countdown(3, "Retrying in", STATE_SPINNERS["retry"])
                     if CANCEL_REQUESTED:
                         break
 
             if not cloned and not CANCEL_REQUESTED:
                 logger.info(f"Falling back to zip for {repo}")
-                repo_progress.update(task, description=f"{name} zip", total=None, completed=0)
+                repo_progress.update(
+                    task,
+                    description=f"{name} zip",
+                    total=None,
+                    completed=0,
+                    spinner=STATE_SPINNERS["zip"],
+                )
                 zip_urls = [
                     f"{repo}/archive/refs/heads/main.zip",
                     f"{repo}/archive/refs/heads/master.zip",
@@ -293,6 +362,7 @@ def clone_repositories(
                                 for chunk in r.iter_content(chunk_size=8192):
                                     f.write(chunk)
                                     repo_progress.advance(task, len(chunk))
+                            repo_progress.update(task, description=f"{name} extract", spinner=STATE_SPINNERS["extract"])
                             shutil.unpack_archive(zip_path, destination)
                             os.remove(zip_path)
                             zip_fallback.append(repo)
@@ -327,7 +397,12 @@ def clone_repositories(
                 )
                 continue
 
-            repo_progress.update(task, description=f"{name} copy", total=None)
+            repo_progress.update(
+                task,
+                description=f"{name} copy",
+                total=None,
+                spinner=STATE_SPINNERS["copy"],
+            )
             copied = 0
             for root, _, files in os.walk(destination):
                 if CANCEL_REQUESTED:
@@ -367,7 +442,14 @@ def clone_repositories(
             logger.info(f"Copied {copied} templates from {repo}")
             success_repos.append(repo)
             shutil.rmtree(destination, ignore_errors=True)
-            repo_progress.update(task, description=f"{name} done", total=1, completed=1)
+            repo_progress.update(
+                task,
+                description=f"{name} done",
+                total=1,
+                completed=1,
+                spinner=STATE_SPINNERS["done"],
+            )
+            time.sleep(0.2)
             repo_progress.remove_task(task)
             active -= 1
             success += 1
@@ -451,6 +533,12 @@ def main() -> None:
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
         cleanup_temp(templates_dir)
+
+    if CANCEL_REQUESTED:
+        console.print("[bold red]Goodbye[/]")
+        wait_countdown(2, "تنظيف…", STATE_SPINNERS["cleanup"])
+    else:
+        show_confetti()
 
     if args.save_success_list:
         success_path = os.path.abspath(args.save_success_list)

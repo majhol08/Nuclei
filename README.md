@@ -35,10 +35,12 @@ python AllForOne.py --repo-list-url <url> --output-dir <directory>
    - `--save-success-list` *(optional)* path to save successfully cloned
     repositories for later reuse
 
-4.  Sit back and relax! The script will show a single interactive screen with
-    one line per active repository updated in place as it checks, clones,
-    retries or falls back to ZIP. A `run.log` file is saved into the output
-    directory capturing every step with timestamps while the console stays
+4.  Sit back and watch an animated dashboard. A single interactive screen keeps
+    at most a handful of lines, one per active repository. Each phase uses a
+    different spinner and emoji (🔍 HEAD, ⬇️ clone, ♻️ retry, 📦 zip, 📂 extract,
+    📄 copy) while a sticky summary bar tracks totals and ETA. Waiting/backoff
+    shows a large countdown, and completion ends with a brief confetti splash.
+    A `run.log` captures every step with timestamps while the console remains
     clean. Unreachable repositories are skipped before cloning and the final
     report shows counts of successful, skipped, failed and ZIP-fallback clones
     along with the log path (and success list if requested).
