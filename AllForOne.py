@@ -13,7 +13,7 @@ import subprocess
 import time
 import errno
 import random
-from datetime import datetime
+import datetime
 from hashlib import sha1
 from urllib.parse import urlparse
 
@@ -157,7 +157,7 @@ def copy_yaml_file(
 
     if hash_val in content_index:
         entry = content_index[hash_val]
-        entry[3] = datetime.utcnow().isoformat()
+        entry[3] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         content_index[hash_val] = entry
         return False, False
 
@@ -167,7 +167,12 @@ def copy_yaml_file(
         existing_hash = compute_sha1(dest_path)
         if existing_hash == hash_val:
             rel_path = os.path.relpath(dest_path, os.path.dirname(index_path))
-            content_index[hash_val] = [rel_path, repo_url, datetime.utcnow().isoformat(), datetime.utcnow().isoformat()]
+            content_index[hash_val] = [
+                rel_path,
+                repo_url,
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            ]
             return False, False
         dest_name = f"{os.path.splitext(basename)[0]}__from-{sanitize_segment(owner)}-{sanitize_segment(repo)}__{hash_val[:8]}.yaml"
         dest_path = os.path.join(dest_folder, dest_name)
@@ -178,8 +183,8 @@ def copy_yaml_file(
     content_index[hash_val] = [
         rel_path,
         repo_url,
-        datetime.utcnow().isoformat(),
-        datetime.utcnow().isoformat(),
+        datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        datetime.datetime.now(datetime.timezone.utc).isoformat(),
     ]
     added = True
     updated = False
@@ -364,7 +369,11 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
                     a = sum_prog.tasks[0].fields["a"] - 1
                     sum_prog.advance(sum_task)
                     sum_prog.update(sum_task, s=s, a=a)
-                    manifest.setdefault("repos", {})[repo] = {"url": repo, "status": "skipped", "last_checked": datetime.utcnow().isoformat()}
+                    manifest.setdefault("repos", {})[repo] = {
+                        "url": repo,
+                        "status": "skipped",
+                        "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    }
                     continue
             except requests.RequestException as exc:
                 logger.warning(f"HEAD {repo} failed: {exc}")
@@ -375,7 +384,11 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
                 a = sum_prog.tasks[0].fields["a"] - 1
                 sum_prog.advance(sum_task)
                 sum_prog.update(sum_task, s=s, a=a)
-                manifest.setdefault("repos", {})[repo] = {"url": repo, "status": "skipped", "last_checked": datetime.utcnow().isoformat()}
+                manifest.setdefault("repos", {})[repo] = {
+                    "url": repo,
+                    "status": "skipped",
+                    "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                }
                 continue
             if CANCEL_REQUESTED:
                 repo_prog.remove_task(t)
@@ -396,7 +409,11 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
                 a = sum_prog.tasks[0].fields["a"] - 1
                 sum_prog.advance(sum_task)
                 sum_prog.update(sum_task, f=f, a=a)
-                manifest.setdefault("repos", {})[repo] = {"url": repo, "status": "failed", "last_checked": datetime.utcnow().isoformat()}
+                manifest.setdefault("repos", {})[repo] = {
+                    "url": repo,
+                    "status": "failed",
+                    "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                }
                 continue
             if not ensure_disk_space(templates_dir):
                 CANCEL_REQUESTED = True
@@ -448,7 +465,14 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
                 sum_prog.advance(sum_task)
                 sum_prog.update(sum_task, u=u, a=a)
             repo_prog.remove_task(t)
-            manifest.setdefault("repos", {})[repo] = {"url": repo, "method": "git", "last_commit": last_commit, "updated_files_count": add + upd, "last_checked": datetime.utcnow().isoformat(), "status": status}
+            manifest.setdefault("repos", {})[repo] = {
+                "url": repo,
+                "method": "git",
+                "last_commit": last_commit,
+                "updated_files_count": add + upd,
+                "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "status": status,
+            }
     return succ, skip, fail
 
 def banner() -> None:
