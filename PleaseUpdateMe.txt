@@ -155,3 +155,4 @@ https://github.com/Linuxinet/nuclei-templates
 https://github.com/Aituglo/nuclei-templates
 https://github.com/abbycantcode/Nuclei-Template
 https://github.com/pacho15/mynuclei_templates
+https://github.com/projectdiscovery/nuclei
