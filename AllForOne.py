@@ -111,12 +111,65 @@ def store_path(store_dir: str, hash_val: str) -> str:
     return os.path.join(sub, f"{hash_val}.yaml")
 
 
-def hardlink_or_copy(src: str, dst: str) -> None:
-    """Create a hard link if possible else copy."""
+def atomic_copy(src: str, dst: str, logger: logging.Logger) -> None:
+    """Copy ``src`` to ``dst`` atomically, removing ``.part`` on failure."""
+    tmp = dst + ".part"
     try:
-        os.link(src, dst)
-    except OSError:
-        shutil.copy2(src, dst)
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    except OSError as e:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        finally:
+            logger.error("copy %s -> %s failed: %s", src, dst, e, exc_info=True)
+        raise
+
+
+def hardlink_or_copy_atomic(src: str, dst: str, logger: logging.Logger) -> None:
+    """Create a hard link (or copy) to ``dst`` atomically."""
+    tmp = dst + ".part"
+    try:
+        try:
+            os.link(src, tmp)
+        except OSError:
+            shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    except OSError as e:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        finally:
+            logger.error("link/copy %s -> %s failed: %s", src, dst, e, exc_info=True)
+        raise
+
+
+def atomic_write(data: bytes, dst: str, logger: logging.Logger) -> None:
+    """Write ``data`` to ``dst`` atomically."""
+    tmp = dst + ".part"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, dst)
+    except OSError as e:
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        finally:
+            logger.error("write %s failed: %s", dst, e, exc_info=True)
+        raise
+
+
+def dir_size(path: str) -> int:
+    """Return approximate size of directory tree in bytes."""
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
 
 
 def parse_size(value: str) -> int | None:
@@ -240,19 +293,14 @@ class DiskSpaceError(Exception):
         self.path = path
 
 
-def check_free_space(paths: list[str], threshold: int = 150 * 1024 * 1024) -> tuple[bool, str | None]:
-    """Ensure all ``paths`` have at least ``threshold`` bytes free.
+def check_free_space(path: str, need_bytes: int, min_headroom_bytes: int = 150 * 1024 * 1024) -> bool:
+    """Return True if ``path`` has enough free space for ``need_bytes`` plus headroom."""
 
-    Returns ``(True, None)`` if enough space, else ``(False, offending_path)``.
-    """
-
-    for p in paths:
-        try:
-            if shutil.disk_usage(p).free < threshold:
-                return False, p
-        except OSError:
-            return False, p
-    return True, None
+    try:
+        free = shutil.disk_usage(path).free
+        return free - need_bytes >= min_headroom_bytes
+    except OSError:
+        return False
 
 
 
@@ -462,16 +510,35 @@ def run_setup(args) -> tuple[str, dict]:
                 default=True,
             )
 
-            summary = Table("Target", "Path", "Mount", "Status")
+            summary = Table("Target", "Path", "Mount", "Free (GB)", "Status")
             summary.add_row(
                 "Output",
                 output_dir,
                 mount_point(output_dir),
+                f"{shutil.disk_usage(output_dir).free/1024**3:.1f}",
                 "✅",
             )
-            summary.add_row("Cache", cache_dir, mount_point(cache_dir), "✅")
-            summary.add_row("Store", store_dir, mount_point(store_dir), "✅")
-            summary.add_row("Tmp", tmp_dir, mount_point(tmp_dir), "✅")
+            summary.add_row(
+                "Cache",
+                cache_dir,
+                mount_point(cache_dir),
+                f"{shutil.disk_usage(cache_dir).free/1024**3:.1f}",
+                "✅",
+            )
+            summary.add_row(
+                "Store",
+                store_dir,
+                mount_point(store_dir),
+                f"{shutil.disk_usage(store_dir).free/1024**3:.1f}",
+                "✅",
+            )
+            summary.add_row(
+                "Tmp",
+                tmp_dir,
+                mount_point(tmp_dir),
+                f"{shutil.disk_usage(tmp_dir).free/1024**3:.1f}",
+                "✅",
+            )
             console.print(summary)
             console.print(
                 f"Disk budget: {'unlimited' if disk_budget is None else str(disk_budget)}"
@@ -570,6 +637,8 @@ def copy_yaml_file(
     commit: str,
     dest_root: str,
     store_dir: str,
+    cache_dir: str,
+    disk_budget: int | None,
     content_index: dict,
     index_path: str,
     url_registry: dict,
@@ -585,17 +654,28 @@ def copy_yaml_file(
     owner, repo = owner_repo.split("/")
     year = extract_cve_year(basename)
     dest_folder = os.path.join(dest_root, f"CVE-{year}" if year else "Vulnerability-Templates")
-    ok, low = check_free_space([dest_root, os.path.realpath(store_dir)])
-    if not ok:
-        raise DiskSpaceError(low)
+
+    file_size = os.path.getsize(source_path)
+    need = max(file_size, 64 * 1024)
+    if not check_free_space(dest_root, need):
+        raise DiskSpaceError(mount_point(dest_root))
+    if not check_free_space(store_dir, need):
+        raise DiskSpaceError(mount_point(store_dir))
+    if disk_budget is not None:
+        total = dir_size(dest_root) + dir_size(store_dir) + dir_size(cache_dir)
+        if total + need > disk_budget:
+            raise DiskSpaceError("over budget")
     os.makedirs(dest_folder, exist_ok=True)
 
     hash_val = compute_sha1(source_path)
     store_file = store_path(store_dir, hash_val)
     if not os.path.exists(store_file):
-        tmp_store = store_file + ".part"
-        shutil.copy2(source_path, tmp_store)
-        os.replace(tmp_store, store_file)
+        try:
+            atomic_copy(source_path, store_file, logger)
+        except OSError as e:
+            if e.errno in (errno.ENOSPC, errno.EDQUOT):
+                raise DiskSpaceError(mount_point(store_dir))
+            raise
 
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -641,9 +721,12 @@ def copy_yaml_file(
                     e["last_updated"] = now
             return False, False
         # replace in place
-        tmp_dest = dest_path + ".part"
-        hardlink_or_copy(store_file, tmp_dest)
-        os.replace(tmp_dest, dest_path)
+        try:
+            hardlink_or_copy_atomic(store_file, dest_path, logger)
+        except OSError as e:
+            if e.errno in (errno.ENOSPC, errno.EDQUOT):
+                raise DiskSpaceError(mount_point(dest_root))
+            raise
         content_index[existing_hash] = [
             e for e in content_index[existing_hash] if not (e["path"] == rel_path and e["repo_url"] == repo_url)
         ]
@@ -661,9 +744,12 @@ def copy_yaml_file(
         dest_path = os.path.join(dest_folder, dest_name)
         rel_path = os.path.relpath(dest_path, os.path.dirname(index_path))
 
-    tmp_dest = dest_path + ".part"
-    hardlink_or_copy(store_file, tmp_dest)
-    os.replace(tmp_dest, dest_path)
+    try:
+        hardlink_or_copy_atomic(store_file, dest_path, logger)
+    except OSError as e:
+        if e.errno in (errno.ENOSPC, errno.EDQUOT):
+            raise DiskSpaceError(mount_point(dest_root))
+        raise
 
     content_index.setdefault(hash_val, []).append(
         {"path": rel_path, "repo_url": repo_url, "first_seen": now, "last_updated": now}
@@ -817,6 +903,7 @@ def clone_repositories(
     file_url: str,
     templates_dir: str,
     cache_dir: str,
+    disk_budget: int | None,
     logger: logging.Logger,
     manifest: dict,
     content_index: dict,
@@ -924,27 +1011,37 @@ def clone_repositories(
             if CANCEL_REQUESTED:
                 repo_prog.remove_task(t)
                 break
-            ok, low = check_free_space([templates_dir, storage_root])
-            if not ok:
-                console.print(f"[red]Low disk space on {low}[/]")
-                logger.warning(f"Low disk space on {low}; skipping {repo}")
-                skip.append(repo)
+            low_mp = None
+            if not check_free_space(templates_dir, 64 * 1024):
+                low_mp = mount_point(templates_dir)
+            elif not check_free_space(storage_root, 64 * 1024):
+                low_mp = mount_point(storage_root)
+            if low_mp:
+                free_mb = shutil.disk_usage(low_mp).free / 1024 ** 2
+                console.print(
+                    f"[red]Low disk space on {low_mp} (free: {free_mb:.0f} MB). Stopped current repo gracefully.[/]"
+                )
+                logger.warning(f"Low disk space on {low_mp}; stopping {repo}")
+                fail.append(repo)
                 repo_prog.update(
                     t,
-                    description=f"{name} {STATUS_ICONS['skipped']} low space",
+                    description=f"{name} {STATUS_ICONS['failed']} low space",
                     total=1,
                     completed=1,
                 )
                 repo_prog.remove_task(t)
-                s = sum_prog.tasks[0].fields["s"] + 1
+                f = sum_prog.tasks[0].fields["f"] + 1
                 a = sum_prog.tasks[0].fields["a"] - 1
                 sum_prog.advance(sum_task)
-                sum_prog.update(sum_task, s=s, a=a)
+                sum_prog.update(sum_task, f=f, a=a)
                 manifest.setdefault("repos", {})[repo] = {
                     "url": repo,
-                    "status": "skipped",
+                    "status": "failed",
                     "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 }
+                if not check_free_space(templates_dir, 64 * 1024) or not check_free_space(storage_root, 64 * 1024):
+                    CANCEL_REQUESTED = True
+                    break
                 continue
             if os.path.isdir(cache):
                 repo_prog.update(t, description=f"{name} pull", spinner=STATE_SPINNERS["clone"])
@@ -992,6 +1089,8 @@ def clone_repositories(
                                 last_commit,
                                 templates_dir,
                                 store_dir,
+                                cache_dir,
+                                disk_budget,
                                 content_index,
                                 index_path,
                                 url_registry,
@@ -1008,25 +1107,37 @@ def clone_repositories(
                                 description=f"[blue]{name} {STATUS_ICONS['updating']} +{add} ~{upd}",
                             )
             except DiskSpaceError as dse:
-                console.print(f"[red]Low disk space on {dse.path}[/]")
-                logger.warning(f"Low disk space on {dse.path}; skipping {repo}")
-                skip.append(repo)
+                if dse.path == "over budget":
+                    console.print("[red]Over disk budget. Stopped current repo gracefully.[/]")
+                    logger.warning(f"Over disk budget; stopping {repo}")
+                    reason_desc = "over budget"
+                else:
+                    free_mb = shutil.disk_usage(dse.path).free / 1024 ** 2
+                    console.print(
+                        f"[red]Low disk space on {dse.path} (free: {free_mb:.0f} MB). Stopped current repo gracefully.[/]"
+                    )
+                    logger.warning(f"Low disk space on {dse.path}; stopping {repo}")
+                    reason_desc = "low space"
+                fail.append(repo)
                 repo_prog.update(
                     t,
-                    description=f"{name} {STATUS_ICONS['skipped']} low space",
+                    description=f"{name} {STATUS_ICONS['failed']} {reason_desc}",
                     total=1,
                     completed=1,
                 )
                 repo_prog.remove_task(t)
-                s = sum_prog.tasks[0].fields["s"] + 1
+                f = sum_prog.tasks[0].fields["f"] + 1
                 a = sum_prog.tasks[0].fields["a"] - 1
                 sum_prog.advance(sum_task)
-                sum_prog.update(sum_task, s=s, a=a)
+                sum_prog.update(sum_task, f=f, a=a)
                 manifest.setdefault("repos", {})[repo] = {
                     "url": repo,
-                    "status": "skipped",
+                    "status": "failed",
                     "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 }
+                if dse.path == "over budget" or not check_free_space(templates_dir, 64 * 1024) or not check_free_space(storage_root, 64 * 1024):
+                    CANCEL_REQUESTED = True
+                    break
                 continue
             if add == 0 and upd == 0:
                 repo_prog.update(
@@ -1198,6 +1309,7 @@ def main() -> None:
             args.repo_list_url,
             templates_dir,
             cache_dir,
+            config.get("disk_budget"),
             logger,
             manifest,
             content_index,
@@ -1210,12 +1322,33 @@ def main() -> None:
         removed_blobs = cleanup_store(store_dir, content_index)
         summarize_templates(templates_dir)
     finally:
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
-        with open(index_path, "w", encoding="utf-8") as f:
-            json.dump(content_index, f, indent=2)
-        with open(url_registry_path, "w", encoding="utf-8") as f:
-            json.dump(url_registry, f, indent=2)
+        manifest_data = json.dumps(manifest, indent=2).encode()
+        index_data = json.dumps(content_index, indent=2).encode()
+        url_data = json.dumps(url_registry, indent=2).encode()
+        try:
+            need = max(len(manifest_data), 64 * 1024)
+            if not check_free_space(templates_dir, need):
+                raise DiskSpaceError(mount_point(templates_dir))
+            atomic_write(manifest_data, manifest_path, logger)
+        except (DiskSpaceError, OSError) as e:
+            recovery = os.path.join(tmp_dir, "manifest.recovery.json")
+            try:
+                atomic_write(manifest_data, recovery, logger)
+                console.print(
+                    f"[yellow]Could not write manifest to output dir; saved recovery copy to {recovery}[/]"
+                )
+                logger.warning("manifest written to recovery location %s", recovery)
+            except Exception as e2:
+                console.print("[red]Failed to write manifest recovery copy[/]")
+                logger.error("manifest recovery failed: %s", e2, exc_info=True)
+        try:
+            atomic_write(index_data, index_path, logger)
+        except Exception:
+            logger.error("failed to write content-index", exc_info=True)
+        try:
+            atomic_write(url_data, url_registry_path, logger)
+        except Exception:
+            logger.error("failed to write url-registry", exc_info=True)
         cleanup_temp(templates_dir)
 
     if CANCEL_REQUESTED:
@@ -1251,11 +1384,15 @@ def main() -> None:
     if success_path:
         stats_table.add_row("success list", success_path)
     console.print(stats_table)
+    exit_code = 0
+    if failed_repos or CANCEL_REQUESTED:
+        exit_code = 2
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        pass
+        sys.exit(2)
 

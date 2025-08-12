@@ -55,7 +55,8 @@ python AllForOne.py --repo-list-url <url> --output-dir <directory>
 
 > **Note:** ensure that you have sufficient free disk space before running the
 > collector. The script will now stop gracefully if the disk fills up while
-> copying templates.
+> copying templates and will write a recovery `manifest.recovery.json` in the
+> temporary directory if the normal manifest cannot be saved.
 
 At startup the collector scans local mounts, skipping read‑only or nearly full
 filesystems, and writes a 1 MiB probe file to validate each candidate. The
