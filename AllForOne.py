@@ -155,41 +155,11 @@ def copy_yaml_file(
         shutil.copy2(source_path, tmp_store)
         os.replace(tmp_store, store_file)
 
-    if hash_val in content_index:
-        entry = content_index[hash_val]
-        entry[3] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        content_index[hash_val] = entry
-        return False, False
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-    dest_name = basename
-    dest_path = os.path.join(dest_folder, dest_name)
-    if os.path.exists(dest_path):
-        existing_hash = compute_sha1(dest_path)
-        if existing_hash == hash_val:
-            rel_path = os.path.relpath(dest_path, os.path.dirname(index_path))
-            content_index[hash_val] = [
-                rel_path,
-                repo_url,
-                datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            ]
-            return False, False
-        dest_name = f"{os.path.splitext(basename)[0]}__from-{sanitize_segment(owner)}-{sanitize_segment(repo)}__{hash_val[:8]}.yaml"
-        dest_path = os.path.join(dest_folder, dest_name)
-
-    hardlink_or_copy(store_file, dest_path)
-
-    rel_path = os.path.relpath(dest_path, os.path.dirname(index_path))
-    content_index[hash_val] = [
-        rel_path,
-        repo_url,
-        datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    ]
-    added = True
-    updated = False
-
-    raw_url = f"{repo_url.replace('github.com', 'raw.githubusercontent.com')}/{commit}/{rel_repo_path.replace(os.sep, '/') }"
+    raw_url = (
+        f"{repo_url.replace('github.com', 'raw.githubusercontent.com')}/{commit}/{rel_repo_path.replace(os.sep, '/')}"
+    )
     stat = os.stat(store_file)
     url_registry[repo_url].append(
         {
@@ -201,7 +171,62 @@ def copy_yaml_file(
         }
     )
 
-    return added, updated
+    if hash_val in content_index:
+        for entry in content_index[hash_val]:
+            entry["last_updated"] = now
+        return False, False
+
+    dest_name = basename
+    dest_path = os.path.join(dest_folder, dest_name)
+    rel_path = os.path.relpath(dest_path, os.path.dirname(index_path))
+
+    # locate existing index entry for this path
+    existing_hash = None
+    existing_repo = None
+    for h, entries in content_index.items():
+        for e in entries:
+            if e["path"] == rel_path:
+                existing_hash = h
+                existing_repo = e["repo_url"]
+                break
+        if existing_hash:
+            break
+
+    if existing_hash and existing_repo == repo_url:
+        if existing_hash == hash_val:
+            for e in content_index[existing_hash]:
+                if e["path"] == rel_path and e["repo_url"] == repo_url:
+                    e["last_updated"] = now
+            return False, False
+        # replace in place
+        tmp_dest = dest_path + ".part"
+        hardlink_or_copy(store_file, tmp_dest)
+        os.replace(tmp_dest, dest_path)
+        content_index[existing_hash] = [
+            e for e in content_index[existing_hash] if not (e["path"] == rel_path and e["repo_url"] == repo_url)
+        ]
+        if not content_index[existing_hash]:
+            del content_index[existing_hash]
+        content_index.setdefault(hash_val, []).append(
+            {"path": rel_path, "repo_url": repo_url, "first_seen": now, "last_updated": now}
+        )
+        return False, True
+
+    if existing_hash and existing_repo != repo_url:
+        dest_name = (
+            f"{os.path.splitext(basename)[0]}__from-{sanitize_segment(owner)}-{sanitize_segment(repo)}__{hash_val[:8]}.yaml"
+        )
+        dest_path = os.path.join(dest_folder, dest_name)
+        rel_path = os.path.relpath(dest_path, os.path.dirname(index_path))
+
+    tmp_dest = dest_path + ".part"
+    hardlink_or_copy(store_file, tmp_dest)
+    os.replace(tmp_dest, dest_path)
+
+    content_index.setdefault(hash_val, []).append(
+        {"path": rel_path, "repo_url": repo_url, "first_seen": now, "last_updated": now}
+    )
+    return True, False
 
 
 def request_cancel(signum, frame) -> None:
@@ -277,6 +302,28 @@ def cleanup_temp(templates_dir: str) -> None:
                 os.remove(os.path.join(root, file))
 
 
+def cleanup_store(store_dir: str, content_index: dict) -> int:
+    """Remove unreferenced blobs from content store."""
+
+    keep = set(content_index.keys())
+    removed = 0
+    for prefix in os.listdir(store_dir):
+        subdir = os.path.join(store_dir, prefix)
+        if not os.path.isdir(subdir):
+            continue
+        for fname in os.listdir(subdir):
+            if not fname.endswith(".yaml"):
+                continue
+            h = fname[:-5]
+            if h not in keep:
+                try:
+                    os.remove(os.path.join(subdir, fname))
+                    removed += 1
+                except OSError:
+                    pass
+    return removed
+
+
 def wait_countdown(seconds: int, message: str, spinner: str = "clock") -> None:
     """Display a countdown with spinner for waits/backoffs."""
 
@@ -340,8 +387,24 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
         n = normalize_repo_url(r)
         if n not in repos:
             repos.append(n)
-    repo_prog = Progress(AnimatedSpinnerColumn(), TextColumn("[progress.description]{task.description}"), BarColumn(), console=console, transient=False, refresh_per_second=10)
-    sum_prog = Progress(BarColumn(), TextColumn("Updated:{task.fields[u]} | Up-to-date:{task.fields[d]} | Skipped:{task.fields[s]} | Failed:{task.fields[f]} | Active:{task.fields[a]} | Queue:{task.fields[q]} |"), TimeRemainingColumn(), console=console, transient=False, refresh_per_second=10)
+    repo_prog = Progress(
+        AnimatedSpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        console=console,
+        transient=False,
+        refresh_per_second=10,
+    )
+    sum_prog = Progress(
+        BarColumn(),
+        TextColumn(
+            "Updated:{task.fields[u]} | Up-to-date:{task.fields[d]} | Skipped:{task.fields[s]} | Failed:{task.fields[f]} | Active:{task.fields[a]} | Queue:{task.fields[q]} |"
+        ),
+        TimeRemainingColumn(),
+        console=console,
+        transient=False,
+        refresh_per_second=10,
+    )
     sum_task = sum_prog.add_task("overall", total=len(repos), u=0, d=0, s=0, f=0, a=0, q=len(repos))
     succ: list[str] = []
     skip: list[str] = []
@@ -361,9 +424,14 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
                 h = requests.head(repo, allow_redirects=True, timeout=15)
                 code = h.status_code
                 logger.info(f"HEAD {repo} -> {code}")
-                if code == 404:
+                if code in (404, 410):
                     skip.append(repo)
-                    repo_prog.update(t, description=f"{name} {STATUS_ICONS['skipped']} 404", total=1, completed=1)
+                    repo_prog.update(
+                        t,
+                        description=f"{name} {STATUS_ICONS['skipped']} 404",
+                        total=1,
+                        completed=1,
+                    )
                     repo_prog.remove_task(t)
                     s = sum_prog.tasks[0].fields["s"] + 1
                     a = sum_prog.tasks[0].fields["a"] - 1
@@ -372,21 +440,30 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
                     manifest.setdefault("repos", {})[repo] = {
                         "url": repo,
                         "status": "skipped",
+                        "deprecated": True,
                         "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     }
+                    manifest.setdefault("deprecated_repos", []).append(repo)
                     continue
+                if not (200 <= code < 400):
+                    raise requests.RequestException(f"HEAD returned {code}")
             except requests.RequestException as exc:
                 logger.warning(f"HEAD {repo} failed: {exc}")
-                skip.append(repo)
-                repo_prog.update(t, description=f"{name} {STATUS_ICONS['skipped']}", total=1, completed=1)
+                fail.append(repo)
+                repo_prog.update(
+                    t,
+                    description=f"{name} {STATUS_ICONS['failed']}",
+                    total=1,
+                    completed=1,
+                )
                 repo_prog.remove_task(t)
-                s = sum_prog.tasks[0].fields["s"] + 1
+                f = sum_prog.tasks[0].fields["f"] + 1
                 a = sum_prog.tasks[0].fields["a"] - 1
                 sum_prog.advance(sum_task)
-                sum_prog.update(sum_task, s=s, a=a)
+                sum_prog.update(sum_task, f=f, a=a)
                 manifest.setdefault("repos", {})[repo] = {
                     "url": repo,
-                    "status": "skipped",
+                    "status": "failed",
                     "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 }
                 continue
@@ -422,7 +499,11 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
                 last_commit = subprocess.check_output(["git", "-C", cache, "rev-parse", "HEAD"]).decode().strip()
             except subprocess.SubprocessError:
                 last_commit = ""
-            repo_prog.update(t, description=f"{name} copy", spinner=STATE_SPINNERS["copy"])
+            repo_prog.update(
+                t,
+                description=f"[blue]{name} {STATUS_ICONS['updating']} +0 ~0",
+                spinner=STATE_SPINNERS["copy"],
+            )
             url_registry[repo] = []
             add = upd = 0
             for root, _, files in os.walk(cache):
@@ -448,8 +529,18 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
                         if u2:
                             upd += 1
                             counters["updated"] += 1
+                        repo_prog.update(
+                            t,
+                            description=f"[blue]{name} {STATUS_ICONS['updating']} +{add} ~{upd}",
+                        )
             if add == 0 and upd == 0:
-                repo_prog.update(t, description=f"{name} {STATUS_ICONS['up_to_date']}", total=1, completed=1, spinner=STATE_SPINNERS["done"])
+                repo_prog.update(
+                    t,
+                    description=f"[green]{name} {STATUS_ICONS['up_to_date']}",
+                    total=1,
+                    completed=1,
+                    spinner=STATE_SPINNERS["done"],
+                )
                 succ.append(repo)
                 status = "up-to-date"
                 d = sum_prog.tasks[0].fields["d"] + 1
@@ -457,7 +548,13 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
                 sum_prog.advance(sum_task)
                 sum_prog.update(sum_task, d=d, a=a)
             else:
-                repo_prog.update(t, description=f"{name} {STATUS_ICONS['updating']} +{add + upd}", total=1, completed=1, spinner=STATE_SPINNERS["done"])
+                repo_prog.update(
+                    t,
+                    description=f"[green]{name} {STATUS_ICONS['updating']} +{add} ~{upd}",
+                    total=1,
+                    completed=1,
+                    spinner=STATE_SPINNERS["done"],
+                )
                 succ.append(repo)
                 status = "updated"
                 u = sum_prog.tasks[0].fields["u"] + 1
@@ -513,12 +610,29 @@ def main() -> None:
         with open(manifest_path, "r", encoding="utf-8") as f:
             manifest = json.load(f)
     else:
-        manifest = {"repos": {}}
+        manifest = {"repos": {}, "deprecated_repos": []}
+    manifest.setdefault("repos", {})
+    manifest.setdefault("deprecated_repos", [])
 
     index_path = os.path.join(templates_dir, "content-index.json")
     if os.path.exists(index_path):
         with open(index_path, "r", encoding="utf-8") as f:
-            content_index = json.load(f)
+            raw_index = json.load(f)
+        content_index = {}
+        for h, entries in raw_index.items():
+            # migrate older list-based schema
+            if entries and isinstance(entries, list) and entries and isinstance(entries[0], str):
+                path, repo_url, first_seen, last_updated = entries
+                content_index[h] = [
+                    {
+                        "path": path,
+                        "repo_url": repo_url,
+                        "first_seen": first_seen,
+                        "last_updated": last_updated,
+                    }
+                ]
+            else:
+                content_index[h] = entries
     else:
         content_index = {}
 
@@ -539,6 +653,7 @@ def main() -> None:
     success_repos: list[str] = []
     skipped_repos: list[str] = []
     failed_repos: list[str] = []
+    removed_blobs = 0
 
     try:
         success_repos, skipped_repos, failed_repos = clone_repositories(
@@ -553,6 +668,7 @@ def main() -> None:
             url_registry,
             store_dir,
         )
+        removed_blobs = cleanup_store(store_dir, content_index)
         summarize_templates(templates_dir)
     finally:
         with open(manifest_path, "w", encoding="utf-8") as f:
@@ -584,10 +700,11 @@ def main() -> None:
     stats_table = Table(show_header=False)
     stats_table.add_row("Updated repos", str(updated_count))
     stats_table.add_row("Up-to-date repos", str(up_to_date_count))
-    stats_table.add_row("Skipped", str(len(skipped_repos)))
+    stats_table.add_row("Skipped (404)", str(len(skipped_repos)))
     stats_table.add_row("Failed", str(len(failed_repos)))
     stats_table.add_row("Added YAMLs", str(counters["added"]))
-    stats_table.add_row("Updated YAMLs", str(counters["updated"]))
+    stats_table.add_row("Changed YAMLs", str(counters["updated"]))
+    stats_table.add_row("removed_orphaned_blobs", str(removed_blobs))
     stats_table.add_row("run.log", log_path)
     stats_table.add_row("manifest", manifest_path)
     stats_table.add_row("content-index", index_path)

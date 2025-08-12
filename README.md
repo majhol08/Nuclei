@@ -57,8 +57,12 @@ tracked in `content-index.json`. The `manifest.json` remembers the last commit
 or check time for every repository so reruns avoid reprocessing unchanged
 sources. A shared `.store` directory keeps a single copy of each unique
 template addressed by its hash; project folders receive hard links pointing to
-that content. The accompanying `url-registry.json` lists every raw YAML URL
-fetched along with its size and hash for auditing.
+that content. During updates the collector compares SHA‑1 hashes and replaces
+changed files atomically while skipping duplicates. After each run orphaned
+blobs are removed from `.store` and the count is reported. The accompanying
+`url-registry.json` lists every raw YAML URL fetched along with its size and
+hash for auditing. Repositories returning 404 are noted under
+`deprecated_repos` in `manifest.json` and skipped on subsequent runs.
 
 Press `Ctrl+C` to cancel at any time. The collector will finish the file in
 progress, clean temporary data, write a summary to `run.log` and
