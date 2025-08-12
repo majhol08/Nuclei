@@ -12,8 +12,8 @@ import time
 import errno
 
 import requests
-from rich.console import Console
-from rich.logging import RichHandler
+from rich.console import Console, Group
+from rich.live import Live
 from rich.progress import (
     BarColumn,
     Progress,
@@ -28,20 +28,16 @@ console = Console()
 
 
 def setup_logger(log_path: str) -> logging.Logger:
-    """Create a logger printing to console and writing to ``log_path``."""
+    """Create a file logger writing to ``log_path``."""
 
     logger = logging.getLogger("collector")
     logger.setLevel(logging.INFO)
-
-    rich_handler = RichHandler(console=console, show_level=False, markup=True)
-    rich_handler.setFormatter(logging.Formatter("%(message)s"))
 
     file_handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
     file_handler.setFormatter(
         logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S")
     )
 
-    logger.addHandler(rich_handler)
     logger.addHandler(file_handler)
     return logger
 
@@ -119,49 +115,108 @@ def clone_repositories(
         logger.error(f"Failed to retrieve repository list: {exc}")
         return [], [], [], []
 
-    accessible_repos: list[str] = []
-    skipped_repos: list[str] = []
-    for repo in repositories:
-        logger.info(f"HEAD {repo}")
-        try:
-            resp = requests.head(repo, allow_redirects=True, timeout=15)
-            logger.info(f"HEAD {repo} -> {resp.status_code}")
-            if resp.status_code == 404:
-                skipped_repos.append(repo)
-            else:
-                accessible_repos.append(repo)
-        except requests.RequestException as exc:
-            logger.warning(f"HEAD {repo} failed: {exc}")
-            skipped_repos.append(repo)
-
     trash_dir = os.path.join(templates_dir, "TRASH")
     os.makedirs(trash_dir, exist_ok=True)
 
     success_repos: list[str] = []
+    skipped_repos: list[str] = []
     failed_repos: list[str] = []
     zip_fallback: list[str] = []
 
-    progress = Progress(
+    repo_progress = Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
-        TimeRemainingColumn(),
         console=console,
-        transient=True,
+        transient=False,
+        refresh_per_second=10,
     )
 
-    overall = progress.add_task("Processing", total=len(accessible_repos))
+    summary_progress = Progress(
+        BarColumn(),
+        TextColumn(
+            "Successful: {task.fields[success]} | Skipped: {task.fields[skipped]} | Failed: {task.fields[failed]} | Active: {task.fields[active]} | Queue: {task.fields[queue]} |",
+        ),
+        TimeRemainingColumn(),
+        console=console,
+        transient=False,
+        refresh_per_second=10,
+    )
 
-    with progress:
-        for repo in accessible_repos:
-            short_name = repo.split("/")[-1]
-            repo_task = progress.add_task(short_name, total=None)
+    total_repos = len(repositories)
+    success = skipped = failed = active = 0
+    queue = total_repos
+    summary_task = summary_progress.add_task(
+        "overall",
+        total=total_repos,
+        success=0,
+        skipped=0,
+        failed=0,
+        active=0,
+        queue=total_repos,
+    )
+
+    group = Group(summary_progress, repo_progress)
+
+    with Live(group, console=console, refresh_per_second=10):
+        for repo in repositories:
+            queue -= 1
+            active += 1
+            summary_progress.update(
+                summary_task,
+                success=success,
+                skipped=skipped,
+                failed=failed,
+                active=active,
+                queue=queue,
+            )
+
+            name = repo.split("/")[-1]
+            task = repo_progress.add_task(f"{name} HEAD", total=None)
+            logger.info(f"HEAD {repo}")
+            try:
+                resp = requests.head(repo, allow_redirects=True, timeout=15)
+                logger.info(f"HEAD {repo} -> {resp.status_code}")
+                if resp.status_code == 404:
+                    skipped_repos.append(repo)
+                    repo_progress.update(task, description=f"{name} skipped 404", total=1, completed=1)
+                    repo_progress.remove_task(task)
+                    active -= 1
+                    skipped += 1
+                    summary_progress.advance(summary_task)
+                    summary_progress.update(
+                        summary_task,
+                        success=success,
+                        skipped=skipped,
+                        failed=failed,
+                        active=active,
+                        queue=queue,
+                    )
+                    continue
+            except requests.RequestException as exc:
+                logger.warning(f"HEAD {repo} failed: {exc}")
+                skipped_repos.append(repo)
+                repo_progress.update(task, description=f"{name} skipped", total=1, completed=1)
+                repo_progress.remove_task(task)
+                active -= 1
+                skipped += 1
+                summary_progress.advance(summary_task)
+                summary_progress.update(
+                    summary_task,
+                    success=success,
+                    skipped=skipped,
+                    failed=failed,
+                    active=active,
+                    queue=queue,
+                )
+                continue
+
             attempt = 1
             destination = os.path.join(trash_dir, generate_destination_folder(repo, trash_dir))
             cloned = False
             while attempt <= 2 and not cloned:
                 logger.info(f"Clone attempt #{attempt} {repo}")
-                progress.update(repo_task, description=f"{short_name} clone #{attempt}")
+                repo_progress.update(task, description=f"{name} clone #{attempt}")
                 return_code, error = git_clone(repo, destination)
                 if return_code == 0:
                     logger.info(f"Clone success {repo}")
@@ -170,34 +225,35 @@ def clone_repositories(
                 logger.warning(f"Clone failed {repo}: {error}")
                 attempt += 1
                 if attempt <= 2:
+                    repo_progress.update(task, description=f"{name} retry #{attempt}")
                     logger.info(f"Retrying {repo} in 3s")
                     time.sleep(3)
 
             if not cloned:
                 logger.info(f"Falling back to zip for {repo}")
-                progress.update(repo_task, description=f"{short_name} zip")
-                zip_url = f"{repo}/archive/refs/heads/main.zip"
-                alt_zip_url = f"{repo}/archive/refs/heads/master.zip"
-                for url in (zip_url, alt_zip_url):
+                repo_progress.update(task, description=f"{name} zip", total=None, completed=0)
+                zip_urls = [
+                    f"{repo}/archive/refs/heads/main.zip",
+                    f"{repo}/archive/refs/heads/master.zip",
+                ]
+                for url in zip_urls:
                     try:
                         with requests.get(url, stream=True, timeout=30) as r:
                             r.raise_for_status()
                             total = int(r.headers.get("Content-Length", 0))
-                            zip_task = progress.add_task(
-                                f"{short_name} download", total=total if total else None
-                            )
+                            if total:
+                                repo_progress.update(task, total=total, completed=0)
                             zip_path = destination + ".zip"
                             with open(zip_path, "wb") as f:
                                 for chunk in r.iter_content(chunk_size=8192):
                                     f.write(chunk)
-                                    progress.advance(zip_task, len(chunk))
-                            progress.remove_task(zip_task)
-                        shutil.unpack_archive(zip_path, destination)
-                        os.remove(zip_path)
-                        zip_fallback.append(repo)
-                        cloned = True
-                        logger.info(f"ZIP fallback success {repo}")
-                        break
+                                    repo_progress.advance(task, len(chunk))
+                            shutil.unpack_archive(zip_path, destination)
+                            os.remove(zip_path)
+                            zip_fallback.append(repo)
+                            cloned = True
+                            logger.info(f"ZIP fallback success {repo}")
+                            break
                     except requests.RequestException as exc:
                         logger.warning(f"ZIP download failed {url}: {exc}")
                     except (shutil.ReadError, FileNotFoundError) as exc:
@@ -205,10 +261,22 @@ def clone_repositories(
 
             if not cloned:
                 failed_repos.append(repo)
-                progress.remove_task(repo_task)
-                progress.advance(overall)
+                repo_progress.update(task, description=f"{name} failed", total=1, completed=1)
+                repo_progress.remove_task(task)
+                active -= 1
+                failed += 1
+                summary_progress.advance(summary_task)
+                summary_progress.update(
+                    summary_task,
+                    success=success,
+                    skipped=skipped,
+                    failed=failed,
+                    active=active,
+                    queue=queue,
+                )
                 continue
 
+            repo_progress.update(task, description=f"{name} copy", total=None)
             copied = 0
             for root, _, files in os.walk(destination):
                 for file in files:
@@ -235,8 +303,19 @@ def clone_repositories(
             logger.info(f"Copied {copied} templates from {repo}")
             success_repos.append(repo)
             shutil.rmtree(destination, ignore_errors=True)
-            progress.remove_task(repo_task)
-            progress.advance(overall)
+            repo_progress.update(task, description=f"{name} done", total=1, completed=1)
+            repo_progress.remove_task(task)
+            active -= 1
+            success += 1
+            summary_progress.advance(summary_task)
+            summary_progress.update(
+                summary_task,
+                success=success,
+                skipped=skipped,
+                failed=failed,
+                active=active,
+                queue=queue,
+            )
 
     shutil.rmtree(trash_dir, ignore_errors=True)
     return success_repos, skipped_repos, failed_repos, zip_fallback

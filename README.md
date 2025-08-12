@@ -35,12 +35,13 @@ python AllForOne.py --repo-list-url <url> --output-dir <directory>
    - `--save-success-list` *(optional)* path to save successfully cloned
     repositories for later reuse
 
-4.  Sit back and relax! The script will start collecting the Nuclei templates
-    from public repositories and present rich progress bars and a live log. A
-    `run.log` file is saved into the output directory capturing every step with
-    timestamps. Unreachable repositories are skipped before cloning and the
-    final report shows counts of successful, skipped, failed and ZIP-fallback
-    clones along with the log path (and success list if requested).
+4.  Sit back and relax! The script will show a single interactive screen with
+    one line per active repository updated in place as it checks, clones,
+    retries or falls back to ZIP. A `run.log` file is saved into the output
+    directory capturing every step with timestamps while the console stays
+    clean. Unreachable repositories are skipped before cloning and the final
+    report shows counts of successful, skipped, failed and ZIP-fallback clones
+    along with the log path (and success list if requested).
  <img src="https://i.ibb.co/hCh6vXB/image.png" width=500/>
 
 > **Note:** ensure that you have sufficient free disk space before running the
