@@ -1,44 +1,66 @@
-# AllForOne - Nuclei Template Collector 👤
-<img width=350px src="https://i.ibb.co/SKGmMyM/WEEEK-1.png" alt="AllForOne - Nuclei Template Collector">
+# MX8_TMPLT – Nuclei Template Collector
 
-Welcome to the "AllForOne" repository! :rocket: This repository contains a Python script that allows bug bounty hunters and security researchers to collect all Nuclei YAML templates from various public repositories, helping to streamline the process of downloading multiple templates using just a single repository.
+MX8_TMPLT is a command-line utility that gathers [Nuclei](https://github.com/projectdiscovery/nuclei) templates from many public repositories into a single organized folder. It is developed by **mon3im.officeil** and is aimed at security researchers and bug bounty hunters who want the latest templates in one run.
 
-## How it Works :gear:
+## Features
+- Automatically finds the largest writable partition and uses it for cache, store, and temporary files.
+- Downloads templates using `git`, the GitHub API, or ZIP archives when needed.
+- Deduplicates files by SHA-1 hash inside a `.store/` directory and hard-links them into an organized tree.
+- Resumes safely after interruptions and writes a detailed `run.log` for each run.
+- Stops gracefully on low disk space or when Ctrl+C is pressed.
+- Rich terminal interface shows per-repository status and live counters.
 
-The script leverages the GitHub repositories which containing Nuclei Templates. It will clones them to your local machine, and extracts the templates, organizing them for easy access.
+## Requirements
+- Python 3.10 or newer.
+- Install dependencies:
 
-## 👋 Connect with me
+```bash
+pip install -r requirements.txt
+```
 
-[![LinkedIn](https://img.shields.io/badge/-LinkedIn-blue?style=flat-square&logo=Linkedin&logoColor=white&link=https://www.linkedin.com/in/AggressiveUser/)](https://www.linkedin.com/in/AggressiveUser/) [![Hack The Box](https://img.shields.io/badge/-Hack%20The%20Box-green?style=flat-square&logo=hack-the-box&logoColor=white&link=https://app.hackthebox.com/profile/17569)](https://app.hackthebox.com/profile/17569) [![GitHub](https://img.shields.io/badge/-GitHub-black?style=flat-square&logo=github&link=https://github.com/AggressiveUser)](https://github.com/AggressiveUser) [![Twitter](https://img.shields.io/badge/-Twitter-blue?style=flat-square&logo=twitter&logoColor=white&link=https://twitter.com/AggressiveUserX)](https://twitter.com/AggressiveUserX) [![Telegram](https://img.shields.io/badge/-Telegram-blue?style=flat-square&logo=telegram&logoColor=white&link=https://t.me/AggressiveUser)](https://t.me/AggressiveUser) [![Email](https://img.shields.io/badge/-Email-red?style=flat-square&logo=Microsoft&logoColor=white&link=mailto:AggressiveUser@OutLook.com)](mailto:AggressiveUser@OutLook.com)
+## Usage
+1. Clone the project:
 
-## Getting Started :rocket:
+```bash
+git clone https://github.com/mon3imofficeil/MX8_TMPLT.git
+cd MX8_TMPLT
+```
 
-To get started, follow these steps:
+2. Run with sensible defaults:
 
-1.  Clone the repository:
-```git clone https://github.com/AggressiveUser/AllForOne.git```  :computer:
+```bash
+python MX8_TMPLT.py
+```
 
-2.  Install the required dependencies:
-```pip install -r requirements.txt```  :key:
+3. Display help:
 
-3.  Run the script:
-```python AllForOne.py```  :snake:
+```bash
+python MX8_TMPLT.py -h
+```
 
-4.  Sit back and relax! The script will start collecting the Nuclei templates from public repositories.
- <img src="https://i.ibb.co/hCh6vXB/image.png" width=500/>
+### Options
+- `--repo-list-url <url>` – URL to a text file containing repository URLs (one per line).
+- `--output-dir <dir>` – Directory where templates and metadata will be stored (default: `Templates`).
+- `--temp-dir <dir>` – Directory for cache, store, and temporary files (overrides automatic mount selection).
+- `--save-success-list <file>` – Write successfully cloned repository URLs to a text file.
+- `--save-templates <archive.zip>` – Create a zip archive of all collected templates.
+- `--setup` – Launch the interactive setup wizard again.
+- `--reset-config` – Ignore the saved configuration for this run.
+- `--yes` – Assume defaults and run non-interactively.
 
-## Result :file_folder:
+## Output
+After a run you will find:
 
-Once the script completes, it will display the total count of templates in a tabular format. It will create a folder named `Templates`  in the repository's root directory. Inside this folder, you'll find subfolders for each cloned repository segregated as per publication year `CVE-20XX` and others as `Vulnerability-Templates`. Each template is stored as a separate file, enabling easy access and utilization for your bug bounty or security testing activities.
+- `.store/` – Unique YAML blobs named by SHA-1.
+- `Templates/` – Primary view: `CVE/<year>/CVE-*.yaml` or `<protocol>/<severity>/<vendor>/<product>/<slug>.yaml`.
+- `Indexes/` – Secondary hard-link indexes grouped by severity, type, vendor/product, and tags.
+- `manifest.json` – Status of each repository (updated, skipped, failed, etc.).
+- `content-index.json` – Metadata for each unique SHA-1.
+- `run.log` – Detailed log with timestamps for troubleshooting.
 
-## Disclaimer :exclamation:
+## Notes
+- Ensure enough disk space; the tool checks free space and stops gracefully when low.
+- Re-running the tool skips repositories that were processed successfully.
 
-Please ensure that you comply with all relevant laws, terms of service, and guidelines when using this tool. The Nuclei tool and the collected templates should be used responsibly and ethically. The creators of this script are not responsible for any misuse or illegal activities performed using the gathered templates.
-
-## Contributions :raising_hand:
-
-Contributions to this project are welcome! If you have any updated and new github repo for nuclei templates, feel free to submit a pull request for `PleaseUpdateMe.txt`
-
-## License :page_facing_up:
-
-This project is licensed under the [MIT License](https://github.com/AggressiveUser/AllForOne/blob/main/LICENSE).
+## License
+This project is licensed under the [MIT](LICENSE) license.
