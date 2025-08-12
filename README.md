@@ -52,6 +52,13 @@ python AllForOne.py --repo-list-url <url> --output-dir <directory>
 > collector. The script will now stop gracefully if the disk fills up while
 > copying templates.
 
+At startup the collector scans all writable mounts and automatically selects
+the one with the most free space. The `.cache` and `.store` directories inside
+`Templates/` become symlinks pointing to that mount so cached repositories and
+deduplicated blobs live off the main output partition. Override this behaviour
+with the environment variables `AFO_CACHE_DIR`, `AFO_STORE_DIR` and
+`AFO_TMPDIR` if you need custom locations.
+
 Each copy uses SHA‑1 deduplication: identical YAML files are written once and
 tracked in `content-index.json`. The `manifest.json` remembers the last commit
 or check time for every repository so reruns avoid reprocessing unchanged

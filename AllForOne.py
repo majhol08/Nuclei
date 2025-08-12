@@ -115,14 +115,143 @@ def hardlink_or_copy(src: str, dst: str) -> None:
         shutil.copy2(src, dst)
 
 
-def ensure_disk_space(path: str, threshold: int = 1_000_000_000) -> bool:
-    """Return True if free space above threshold (default 1GB)."""
-    usage = shutil.disk_usage(path)
-    if usage.free < threshold:
-        console.print("[red]Insufficient disk space (<1GB). Aborting.[/]")
-        return False
-    return True
+class DiskSpaceError(Exception):
+    """Raised when disk space falls below the safety threshold."""
 
+    def __init__(self, path: str):
+        super().__init__(path)
+        self.path = path
+
+
+def check_free_space(paths: list[str], threshold: int = 150 * 1024 * 1024) -> tuple[bool, str | None]:
+    """Ensure all ``paths`` have at least ``threshold`` bytes free.
+
+    Returns ``(True, None)`` if enough space, else ``(False, offending_path)``.
+    """
+
+    for p in paths:
+        try:
+            if shutil.disk_usage(p).free < threshold:
+                return False, p
+        except OSError:
+            return False, p
+    return True, None
+
+
+def find_best_mount(threshold: int = 512 * 1024 * 1024) -> str | None:
+    """Return writable mount point with most free space above ``threshold``."""
+
+    candidates: list[tuple[int, str]] = []
+    try:
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                _dev, mount, fstype = parts[:3]
+                if fstype.startswith("proc") or fstype in {
+                    "sysfs",
+                    "cgroup",
+                    "cgroup2",
+                    "overlay",
+                    "squashfs",
+                    "tmpfs",
+                    "devtmpfs",
+                    "nsfs",
+                }:
+                    continue
+                if not os.path.isdir(mount) or not os.access(mount, os.W_OK):
+                    continue
+                try:
+                    usage = shutil.disk_usage(mount)
+                except OSError:
+                    continue
+                if usage.free < threshold:
+                    continue
+                candidates.append((usage.free, mount))
+    except OSError:
+        return None
+
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def ensure_symlink(link: str, target: str, logger: logging.Logger) -> None:
+    """Ensure ``link`` points to ``target`` using a symlink.
+
+    If ``link`` exists as a directory, move its contents to ``target`` first.
+    Falls back to plain directories if symlinks are unsupported.
+    """
+
+    target = os.path.abspath(target)
+    if os.path.islink(link):
+        current = os.path.realpath(link)
+        if current == target:
+            return
+        os.unlink(link)
+    elif os.path.isdir(link):
+        if os.path.abspath(link) != target:
+            os.makedirs(target, exist_ok=True)
+            for name in os.listdir(link):
+                shutil.move(os.path.join(link, name), target)
+            os.rmdir(link)
+            logger.info("Moved %s contents to %s", link, target)
+        else:
+            return
+    elif os.path.exists(link):
+        os.remove(link)
+
+    os.makedirs(target, exist_ok=True)
+    try:
+        os.symlink(target, link)
+        logger.info("Symlinked %s -> %s", link, target)
+    except OSError:
+        logger.warning("Symlinks unsupported for %s; using regular directory", link)
+        os.makedirs(link, exist_ok=True)
+
+
+def setup_storage(templates_dir: str, logger: logging.Logger) -> tuple[str, str, str, str]:
+    """Configure cache, store and tmp locations, returning paths.
+
+    Returns ``(cache_dir, store_dir, tmp_dir, storage_root)`` where ``cache_dir``
+    is the repos cache root, ``store_dir`` is the content store symlink, and
+    ``storage_root`` is the real filesystem path backing the store.
+    """
+
+    env_cache = os.environ.get("AFO_CACHE_DIR")
+    env_store = os.environ.get("AFO_STORE_DIR")
+    env_tmp = os.environ.get("AFO_TMPDIR")
+
+    best_mount = find_best_mount()
+    if not (env_cache or env_store or env_tmp):
+        if best_mount and os.path.abspath(best_mount) != os.path.abspath(templates_dir):
+            free_gb = shutil.disk_usage(best_mount).free / (1024 ** 3)
+            console.print(
+                f"Using BEST_MOUNT for cache/store/tmp: {best_mount} (free: {free_gb:.1f} GB)"
+            )
+        else:
+            console.print("No large writable mount found, falling back to OUTPUT_DIR")
+            best_mount = templates_dir
+    else:
+        best_mount = env_cache or env_store or env_tmp or templates_dir
+
+    cache_target = env_cache or os.path.join(best_mount, "afo", "cache")
+    store_target = env_store or os.path.join(best_mount, "afo", "store")
+    tmp_target = env_tmp or os.path.join(best_mount, "afo", "tmp")
+
+    ensure_symlink(os.path.join(templates_dir, ".cache"), cache_target, logger)
+    ensure_symlink(os.path.join(templates_dir, ".store"), store_target, logger)
+    os.makedirs(tmp_target, exist_ok=True)
+    os.environ["TMPDIR"] = tmp_target
+
+    cache_dir = os.path.join(templates_dir, ".cache", "repos")
+    os.makedirs(cache_dir, exist_ok=True)
+    store_dir = os.path.join(templates_dir, ".store")
+    os.makedirs(store_dir, exist_ok=True)
+    storage_root = os.path.realpath(store_dir)
+    return cache_dir, store_dir, tmp_target, storage_root
 
 def copy_yaml_file(
     source_path: str,
@@ -146,6 +275,9 @@ def copy_yaml_file(
     owner, repo = owner_repo.split("/")
     year = extract_cve_year(basename)
     dest_folder = os.path.join(dest_root, f"CVE-{year}" if year else "Vulnerability-Templates")
+    ok, low = check_free_space([dest_root, os.path.realpath(store_dir)])
+    if not ok:
+        raise DiskSpaceError(low)
     os.makedirs(dest_folder, exist_ok=True)
 
     hash_val = compute_sha1(source_path)
@@ -371,7 +503,19 @@ def show_confetti(duration: float = 2.0) -> None:
     return
 
 
-def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger: logging.Logger, manifest: dict, content_index: dict, index_path: str, counters: dict, url_registry: dict, store_dir: str) -> tuple[list[str], list[str], list[str]]:
+def clone_repositories(
+    file_url: str,
+    templates_dir: str,
+    cache_dir: str,
+    logger: logging.Logger,
+    manifest: dict,
+    content_index: dict,
+    index_path: str,
+    counters: dict,
+    url_registry: dict,
+    store_dir: str,
+    storage_root: str,
+) -> tuple[list[str], list[str], list[str]]:
     """Fetch repositories and update templates incrementally."""
     global CANCEL_REQUESTED
     logger.info(f"Fetching repository list from: {file_url}")
@@ -470,6 +614,28 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
             if CANCEL_REQUESTED:
                 repo_prog.remove_task(t)
                 break
+            ok, low = check_free_space([templates_dir, storage_root])
+            if not ok:
+                console.print(f"[red]Low disk space on {low}[/]")
+                logger.warning(f"Low disk space on {low}; skipping {repo}")
+                skip.append(repo)
+                repo_prog.update(
+                    t,
+                    description=f"{name} {STATUS_ICONS['skipped']} low space",
+                    total=1,
+                    completed=1,
+                )
+                repo_prog.remove_task(t)
+                s = sum_prog.tasks[0].fields["s"] + 1
+                a = sum_prog.tasks[0].fields["a"] - 1
+                sum_prog.advance(sum_task)
+                sum_prog.update(sum_task, s=s, a=a)
+                manifest.setdefault("repos", {})[repo] = {
+                    "url": repo,
+                    "status": "skipped",
+                    "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                }
+                continue
             if os.path.isdir(cache):
                 repo_prog.update(t, description=f"{name} pull", spinner=STATE_SPINNERS["clone"])
                 r = subprocess.run(["git", "-C", cache, "pull", "--ff-only"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -492,9 +658,6 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
                     "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 }
                 continue
-            if not ensure_disk_space(templates_dir):
-                CANCEL_REQUESTED = True
-                break
             try:
                 last_commit = subprocess.check_output(["git", "-C", cache, "rev-parse", "HEAD"]).decode().strip()
             except subprocess.SubprocessError:
@@ -506,33 +669,55 @@ def clone_repositories(file_url: str, templates_dir: str, cache_dir: str, logger
             )
             url_registry[repo] = []
             add = upd = 0
-            for root, _, files in os.walk(cache):
-                for f in files:
-                    if f.endswith(".yaml"):
-                        src = os.path.join(root, f)
-                        rel_repo_path = os.path.relpath(src, cache)
-                        a2, u2 = copy_yaml_file(
-                            src,
-                            rel_repo_path,
-                            repo,
-                            last_commit,
-                            templates_dir,
-                            store_dir,
-                            content_index,
-                            index_path,
-                            url_registry,
-                            logger,
-                        )
-                        if a2:
-                            add += 1
-                            counters["added"] += 1
-                        if u2:
-                            upd += 1
-                            counters["updated"] += 1
-                        repo_prog.update(
-                            t,
-                            description=f"[blue]{name} {STATUS_ICONS['updating']} +{add} ~{upd}",
-                        )
+            try:
+                for root, _, files in os.walk(cache):
+                    for f in files:
+                        if f.endswith(".yaml"):
+                            src = os.path.join(root, f)
+                            rel_repo_path = os.path.relpath(src, cache)
+                            a2, u2 = copy_yaml_file(
+                                src,
+                                rel_repo_path,
+                                repo,
+                                last_commit,
+                                templates_dir,
+                                store_dir,
+                                content_index,
+                                index_path,
+                                url_registry,
+                                logger,
+                            )
+                            if a2:
+                                add += 1
+                                counters["added"] += 1
+                            if u2:
+                                upd += 1
+                                counters["updated"] += 1
+                            repo_prog.update(
+                                t,
+                                description=f"[blue]{name} {STATUS_ICONS['updating']} +{add} ~{upd}",
+                            )
+            except DiskSpaceError as dse:
+                console.print(f"[red]Low disk space on {dse.path}[/]")
+                logger.warning(f"Low disk space on {dse.path}; skipping {repo}")
+                skip.append(repo)
+                repo_prog.update(
+                    t,
+                    description=f"{name} {STATUS_ICONS['skipped']} low space",
+                    total=1,
+                    completed=1,
+                )
+                repo_prog.remove_task(t)
+                s = sum_prog.tasks[0].fields["s"] + 1
+                a = sum_prog.tasks[0].fields["a"] - 1
+                sum_prog.advance(sum_task)
+                sum_prog.update(sum_task, s=s, a=a)
+                manifest.setdefault("repos", {})[repo] = {
+                    "url": repo,
+                    "status": "skipped",
+                    "last_checked": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                }
+                continue
             if add == 0 and upd == 0:
                 repo_prog.update(
                     t,
@@ -643,10 +828,7 @@ def main() -> None:
     else:
         url_registry = {}
 
-    cache_dir = os.path.join(templates_dir, ".cache", "repos")
-    os.makedirs(cache_dir, exist_ok=True)
-    store_dir = os.path.join(templates_dir, ".store")
-    os.makedirs(store_dir, exist_ok=True)
+    cache_dir, store_dir, tmp_dir, storage_root = setup_storage(templates_dir, logger)
 
     counters = {"added": 0, "updated": 0}
 
@@ -667,6 +849,7 @@ def main() -> None:
             counters,
             url_registry,
             store_dir,
+            storage_root,
         )
         removed_blobs = cleanup_store(store_dir, content_index)
         summarize_templates(templates_dir)
