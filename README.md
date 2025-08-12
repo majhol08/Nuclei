@@ -28,14 +28,17 @@ python AllForOne.py --repo-list-url <url> --output-dir <directory>
 ```
 
    - `--repo-list-url` *(optional)* URL pointing to a text file containing
-     repository links. Defaults to
-     `https://raw.githubusercontent.com/AggressiveUser/AllForOne/main/PleaseUpdateMe.txt`
+    repository links. Defaults to
+    `https://raw.githubusercontent.com/AggressiveUser/AllForOne/main/PleaseUpdateMe.txt`
    - `--output-dir` *(optional)* directory where the collected templates will be
      stored. Defaults to `Templates`
    - `--save-success-list` *(optional)* path to save successfully cloned
     repositories for later reuse
    - `--temp-dir` *(optional)* directory used for cache and temp data; by default
-     the script auto-selects the largest writable mount
+    the script auto-selects the largest writable mount
+   - `--setup` *(optional)* rerun the interactive setup wizard
+   - `--reset-config` *(optional)* ignore saved configuration for this run
+   - `--yes` *(optional)* assume defaults and run non-interactively
 
 4.  Sit back and watch an animated dashboard. A single interactive screen keeps
     at most a handful of lines, one per active repository. Each phase uses a
@@ -60,6 +63,12 @@ the one with the most free space. The `.cache` and `.store` directories inside
 deduplicated blobs live off the main output partition. Override this behaviour
 with the `--temp-dir` option or the environment variables `AFO_CACHE_DIR`,
 `AFO_STORE_DIR` and `AFO_TMPDIR` if you need custom locations.
+
+On first run a short setup wizard appears (unless `--yes` is used) asking for
+the output directory, cache/store locations, optional symlinks and a disk
+budget. The chosen settings are saved to `afo.config.json` for subsequent runs.
+Reconfigure at any time with `--setup` or ignore the saved settings once with
+`--reset-config`.
 
 Each copy uses SHA‑1 deduplication: identical YAML files are written once and
 tracked in `content-index.json`. The `manifest.json` remembers the last commit

@@ -7,6 +7,7 @@ import glob
 import json
 import logging
 import os
+import sys
 import shutil
 import signal
 import subprocess
@@ -14,6 +15,7 @@ import time
 import errno
 import random
 import datetime
+import tempfile
 from hashlib import sha1
 from urllib.parse import urlparse
 
@@ -29,6 +31,8 @@ from rich.progress import (
 )
 from rich.spinner import Spinner
 from rich.table import Table
+from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
 
 
 console = Console()
@@ -113,6 +117,68 @@ def hardlink_or_copy(src: str, dst: str) -> None:
         os.link(src, dst)
     except OSError:
         shutil.copy2(src, dst)
+
+
+def parse_size(value: str) -> int | None:
+    """Parse human-readable size like ``1G`` into bytes."""
+    if not value:
+        return None
+    value = value.strip()
+    units = {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3, "t": 1024 ** 4}
+    try:
+        if value[-1].lower() in units:
+            return int(float(value[:-1]) * units[value[-1].lower()])
+        return int(value)
+    except ValueError:
+        return None
+
+
+def discover_mounts(threshold: int = 512 * 1024 * 1024) -> list[tuple[int, str]]:
+    """Return sorted list of writable mounts with free space >= ``threshold``."""
+    try:
+        out = subprocess.check_output(["df", "-PkT"], text=True).splitlines()
+    except Exception:
+        return []
+    candidates: list[tuple[int, str]] = []
+    for line in out[1:]:
+        parts = line.split()
+        if len(parts) < 7:
+            continue
+        fstype = parts[1]
+        avail = int(parts[4]) * 1024
+        mount = parts[6]
+        if fstype in {
+            "proc",
+            "sysfs",
+            "cgroup",
+            "cgroup2",
+            "overlay",
+            "squashfs",
+            "tmpfs",
+            "devtmpfs",
+            "nsfs",
+        }:
+            continue
+        if avail < threshold:
+            continue
+        if not os.path.isdir(mount) or not os.access(mount, os.W_OK):
+            continue
+        candidates.append((avail, mount))
+    candidates.sort(reverse=True)
+    return candidates
+
+
+def is_writable(path: str) -> bool:
+    """Return ``True`` if ``path`` is writable."""
+    try:
+        os.makedirs(path, exist_ok=True)
+        test_file = os.path.join(path, ".afo_write_test")
+        with open(test_file, "w") as f:
+            f.write("ok")
+        os.remove(test_file)
+        return True
+    except OSError:
+        return False
 
 
 class DiskSpaceError(Exception):
@@ -212,44 +278,224 @@ def ensure_symlink(link: str, target: str, logger: logging.Logger) -> None:
         os.makedirs(link, exist_ok=True)
 
 
+def run_setup(args) -> tuple[str, dict]:
+    """Run interactive setup wizard or load existing configuration."""
+
+    default_output = os.environ.get("AFO_OUTPUT_DIR") or args.output_dir
+    default_output = os.path.abspath(os.path.expanduser(default_output))
+
+    interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.yes
+
+    if interactive and not os.environ.get("AFO_OUTPUT_DIR"):
+        try:
+            output_dir = Prompt.ask(
+                "Output directory? (default: ./Templates)", default=default_output
+            )
+        except KeyboardInterrupt:
+            console.print("[red]Setup cancelled[/]")
+            raise SystemExit(1)
+    else:
+        output_dir = default_output
+
+    output_dir = os.path.abspath(os.path.expanduser(output_dir))
+    os.makedirs(output_dir, exist_ok=True)
+
+    config_path = os.path.join(output_dir, "afo.config.json")
+    if not args.setup and not args.reset_config and os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        return output_dir, config
+
+    candidates = discover_mounts()
+
+    # defaults when prompts are skipped
+    base = candidates[0][1] if candidates else output_dir
+    cache_dir = os.environ.get("AFO_CACHE_DIR") or os.path.join(base, "afo", "cache")
+    store_dir = os.environ.get("AFO_STORE_DIR") or os.path.join(base, "afo", "store")
+    tmp_dir = os.environ.get("AFO_TMPDIR") or os.path.join(base, "afo", "tmp")
+    create_symlinks = os.path.abspath(base) != os.path.abspath(output_dir)
+    disk_budget = parse_size(os.environ.get("AFO_DISK_BUDGET", ""))
+    stop_low = True
+
+    if interactive:
+        try:
+            if candidates:
+                table = Table("Mount", "Free (GB)")
+                for avail, mount in candidates[:3]:
+                    table.add_row(mount, f"{avail/1024**3:.1f}")
+                console.print(table)
+
+            if not (
+                os.environ.get("AFO_CACHE_DIR")
+                or os.environ.get("AFO_STORE_DIR")
+                or os.environ.get("AFO_TMPDIR")
+            ):
+                use_best = Confirm.ask(
+                    "Use the best mount for cache/store/tmp? (Y/n)", default=True
+                )
+            else:
+                use_best = True
+
+            if not use_best:
+                cache_dir = Prompt.ask(
+                    "Cache dir", default=os.path.join(output_dir, ".cache")
+                )
+                store_dir = Prompt.ask(
+                    "Store dir", default=os.path.join(output_dir, ".store")
+                )
+                tmp_dir = Prompt.ask(
+                    "Temp dir", default=tempfile.gettempdir()
+                )
+                cache_dir = os.path.abspath(os.path.expanduser(cache_dir))
+                store_dir = os.path.abspath(os.path.expanduser(store_dir))
+                tmp_dir = os.path.abspath(os.path.expanduser(tmp_dir))
+            else:
+                cache_dir = os.path.abspath(cache_dir)
+                store_dir = os.path.abspath(store_dir)
+                tmp_dir = os.path.abspath(tmp_dir)
+
+            # validate paths
+            while not is_writable(cache_dir):
+                console.print("[red]Cache path not writable[/]")
+                cache_dir = os.path.abspath(
+                    os.path.expanduser(
+                        Prompt.ask(
+                            "Cache dir", default=os.path.join(output_dir, ".cache")
+                        )
+                    )
+                )
+            while not is_writable(store_dir):
+                console.print("[red]Store path not writable[/]")
+                store_dir = os.path.abspath(
+                    os.path.expanduser(
+                        Prompt.ask(
+                            "Store dir", default=os.path.join(output_dir, ".store")
+                        )
+                    )
+                )
+            while not is_writable(tmp_dir):
+                console.print("[red]Temp path not writable[/]")
+                tmp_dir = os.path.abspath(
+                    os.path.expanduser(
+                        Prompt.ask("Temp dir", default=tempfile.gettempdir())
+                    )
+                )
+
+            if (
+                os.path.commonpath([cache_dir, output_dir])
+                != os.path.abspath(output_dir)
+                or os.path.commonpath([store_dir, output_dir])
+                != os.path.abspath(output_dir)
+            ):
+                create_symlinks = Confirm.ask(
+                    f"Create symlinks .cache and .store inside {output_dir} pointing to the chosen locations? (Y/n)",
+                    default=True,
+                )
+            else:
+                create_symlinks = False
+
+            if os.environ.get("AFO_DISK_BUDGET"):
+                disk_budget = parse_size(os.environ["AFO_DISK_BUDGET"])
+            else:
+                while True:
+                    val = Prompt.ask(
+                        "Set a disk budget for all data (e.g. 1G, 2G). Leave empty for unlimited:",
+                        default="",
+                    )
+                    disk_budget = parse_size(val)
+                    if val == "" or disk_budget is not None:
+                        break
+
+            stop_low = Confirm.ask(
+                "On low disk space, stop current repo gracefully and print summary? (Y/n)",
+                default=True,
+            )
+
+            summary = Table(show_header=False)
+            summary.add_row("Output dir", output_dir)
+            summary.add_row("Cache dir", cache_dir)
+            summary.add_row("Store dir", store_dir)
+            summary.add_row("Temp dir", tmp_dir)
+            summary.add_row(
+                "Disk budget",
+                "unlimited" if disk_budget is None else str(disk_budget),
+            )
+            console.print(summary)
+
+            if Confirm.ask(
+                f"Save these settings to {config_path} for future runs? (Y/n)",
+                default=True,
+            ):
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        {
+                            "cache_dir": cache_dir,
+                            "store_dir": store_dir,
+                            "tmp_dir": tmp_dir,
+                            "disk_budget": disk_budget,
+                            "stop_on_low_space": stop_low,
+                            "link_cache_store": create_symlinks,
+                        },
+                        f,
+                        indent=2,
+                    )
+        except KeyboardInterrupt:
+            console.print("[red]Setup cancelled[/]")
+            raise SystemExit(1)
+
+    config = {
+        "cache_dir": cache_dir,
+        "store_dir": store_dir,
+        "tmp_dir": tmp_dir,
+        "disk_budget": disk_budget,
+        "stop_on_low_space": stop_low,
+        "link_cache_store": create_symlinks,
+    }
+
+    if not interactive and (
+        args.setup or (not os.path.exists(config_path) and not args.reset_config)
+    ):
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+
+    return output_dir, config
+
+
 def setup_storage(
-    templates_dir: str, logger: logging.Logger, temp_dir: str | None
+    templates_dir: str,
+    logger: logging.Logger,
+    cache_target: str,
+    store_target: str,
+    tmp_target: str,
+    link_cache_store: bool,
 ) -> tuple[str, str, str, str]:
-    """Configure cache, store and tmp locations, returning paths.
+    """Ensure cache, store and tmp locations exist and return their paths."""
 
-    Returns ``(cache_dir, store_dir, tmp_dir, storage_root)`` where ``cache_dir``
-    is the repos cache root, ``store_dir`` is the content store symlink, and
-    ``storage_root`` is the real filesystem path backing the store.
-    """
+    cache_target = os.path.abspath(cache_target)
+    store_target = os.path.abspath(store_target)
+    tmp_target = os.path.abspath(tmp_target)
 
-    env_cache = os.environ.get("AFO_CACHE_DIR")
-    env_store = os.environ.get("AFO_STORE_DIR")
-    env_tmp = os.environ.get("AFO_TMPDIR")
+    if link_cache_store and os.path.abspath(cache_target) != os.path.join(
+        templates_dir, ".cache"
+    ):
+        ensure_symlink(os.path.join(templates_dir, ".cache"), cache_target, logger)
+        cache_dir = os.path.join(templates_dir, ".cache", "repos")
+    else:
+        os.makedirs(os.path.join(cache_target, "repos"), exist_ok=True)
+        cache_dir = os.path.join(cache_target, "repos")
 
-    base_dir = env_cache or env_store or env_tmp or temp_dir or find_best_mount()
+    if link_cache_store and os.path.abspath(store_target) != os.path.join(
+        templates_dir, ".store"
+    ):
+        ensure_symlink(os.path.join(templates_dir, ".store"), store_target, logger)
+        store_dir = os.path.join(templates_dir, ".store")
+    else:
+        os.makedirs(store_target, exist_ok=True)
+        store_dir = store_target
 
-    if not base_dir:
-        console.print("No large writable mount found, falling back to OUTPUT_DIR")
-        base_dir = templates_dir
-    elif os.path.abspath(base_dir) != os.path.abspath(templates_dir):
-        free_gb = shutil.disk_usage(base_dir).free / (1024 ** 3)
-        console.print(
-            f"Using BEST_MOUNT for cache/store/tmp: {base_dir} (free: {free_gb:.1f} GB)"
-        )
-
-    cache_target = env_cache or os.path.join(base_dir, "afo", "cache")
-    store_target = env_store or os.path.join(base_dir, "afo", "store")
-    tmp_target = env_tmp or os.path.join(base_dir, "afo", "tmp")
-
-    ensure_symlink(os.path.join(templates_dir, ".cache"), cache_target, logger)
-    ensure_symlink(os.path.join(templates_dir, ".store"), store_target, logger)
     os.makedirs(tmp_target, exist_ok=True)
     os.environ["TMPDIR"] = tmp_target
 
-    cache_dir = os.path.join(templates_dir, ".cache", "repos")
-    os.makedirs(cache_dir, exist_ok=True)
-    store_dir = os.path.join(templates_dir, ".store")
-    os.makedirs(store_dir, exist_ok=True)
     storage_root = os.path.realpath(store_dir)
     return cache_dir, store_dir, tmp_target, storage_root
 
@@ -784,15 +1030,50 @@ def main() -> None:
         metavar="PATH",
         help="Save successfully cloned repository URLs to this file.",
     )
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        help="Run initial setup wizard.",
+    )
+    parser.add_argument(
+        "--reset-config",
+        action="store_true",
+        help="Ignore saved configuration for this run.",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Assume defaults and run non-interactively.",
+    )
     args = parser.parse_args()
 
+    output_dir, config = run_setup(args)
+
     banner()
-    templates_dir = os.path.abspath(args.output_dir)
+    templates_dir = os.path.abspath(output_dir)
     os.makedirs(templates_dir, exist_ok=True)
 
     log_path = os.path.join(templates_dir, "run.log")
     logger = setup_logger(log_path)
     signal.signal(signal.SIGINT, request_cancel)
+    logger.info(
+        "output_dir=%s cache_dir=%s store_dir=%s tmp_dir=%s disk_budget=%s stop_on_low_space=%s link_cache_store=%s",
+        templates_dir,
+        config["cache_dir"],
+        config["store_dir"],
+        config["tmp_dir"],
+        config["disk_budget"],
+        config["stop_on_low_space"],
+        config["link_cache_store"],
+    )
+    if args.temp_dir:
+        base = os.path.abspath(args.temp_dir)
+        config["cache_dir"] = os.path.join(base, "afo", "cache")
+        config["store_dir"] = os.path.join(base, "afo", "store")
+        config["tmp_dir"] = os.path.join(base, "afo", "tmp")
+        config["link_cache_store"] = True
+    if config.get("disk_budget") is not None:
+        os.environ["AFO_DISK_BUDGET"] = str(config["disk_budget"])
 
     manifest_path = os.path.join(templates_dir, "manifest.json")
     if os.path.exists(manifest_path):
@@ -833,7 +1114,12 @@ def main() -> None:
         url_registry = {}
 
     cache_dir, store_dir, tmp_dir, storage_root = setup_storage(
-        templates_dir, logger, args.temp_dir
+        templates_dir,
+        logger,
+        config["cache_dir"],
+        config["store_dir"],
+        config["tmp_dir"],
+        config["link_cache_store"],
     )
 
     counters = {"added": 0, "updated": 0}
