@@ -21,11 +21,79 @@ To get started, follow these steps:
 2.  Install the required dependencies:
 ```pip install -r requirements.txt```  :key:
 
-3.  Run the script:
-```python AllForOne.py```  :snake:
+3.  Run the script (use `-h` to see available options):
 
-4.  Sit back and relax! The script will start collecting the Nuclei templates from public repositories.
- <img src="https://i.ibb.co/hCh6vXB/image.png" width=500/>
+```bash
+python AllForOne.py --repo-list-url <url> --output-dir <directory>
+```
+
+   - `--repo-list-url` *(optional)* URL pointing to a text file containing
+   repository links. Defaults to
+    `https://raw.githubusercontent.com/AggressiveUser/AllForOne/main/PleaseUpdateMe.txt`
+   - `--output-dir` *(optional)* directory where the collected templates will be
+     stored. Defaults to `Templates`
+   - `--save-success-list` *(optional)* path to save successfully cloned
+    repositories for later reuse
+   - `--save-templates` *(optional)* write a zip archive containing all
+     collected templates to the given path
+   - `--temp-dir` *(optional)* directory used for cache and temp data; by default
+    the script auto-selects the largest writable mount
+   - `--setup` *(optional)* rerun the interactive setup wizard
+   - `--reset-config` *(optional)* ignore saved configuration for this run
+   - `--yes` *(optional)* assume defaults and run non-interactively
+
+4.  Sit back and watch an animated dashboard. A single interactive screen keeps
+    at most a handful of lines, one per active repository. Each phase uses a
+    different spinner and emoji (🔍 HEAD, ⬇️ clone, ♻️ retry, 📦 zip, 📂 extract,
+    📄 copy) while a sticky summary bar tracks totals and ETA. Waiting/backoff
+    shows a large countdown, and completion ends with a brief confetti splash.
+    A `run.log` captures every step with timestamps while the console remains
+    clean. Repositories already cloned live in `Templates/.cache/repos` and are
+    updated with `git pull` on subsequent runs, so only new or changed YAML
+    files are copied. Unreachable repositories are skipped before cloning and
+    the final report shows counts of updated, up-to-date, skipped and failed
+    repositories along with the log path, manifest and optional success list.
+<img src="https://i.ibb.co/hCh6vXB/image.png" width=500/>
+
+> **Note:** ensure that you have sufficient free disk space before running the
+> collector. The script will now stop gracefully if the disk fills up while
+> copying templates and will write a recovery `manifest.recovery.json` in the
+> temporary directory if the normal manifest cannot be saved.
+
+At startup the collector scans local mounts, skipping read‑only or nearly full
+filesystems, and writes a 1 MiB probe file to validate each candidate. The
+largest validated mount is recommended for the output directory as well so
+templates, cache and store share the same disk. `.cache` and `.store` inside
+`Templates/` become symlinks pointing there so cached repositories and
+deduplicated blobs live off the main output partition. Override this behaviour
+with the `--temp-dir` option or the environment variables `AFO_CACHE_DIR`,
+`AFO_STORE_DIR` and `AFO_TMPDIR` if you need custom locations.
+
+On first run a short setup wizard appears (unless `--yes` is used) asking for
+the output directory, cache/store locations, optional symlinks and a disk
+budget. The chosen settings are saved to `afo.config.json` for subsequent runs.
+Reconfigure at any time with `--setup` or ignore the saved settings once with
+`--reset-config`.
+
+Each copy uses SHA‑1 deduplication: identical YAML files are written once and
+tracked in `content-index.json`. The `manifest.json` remembers the last commit
+or check time for every repository so reruns avoid reprocessing unchanged
+sources. A shared `.store` directory keeps a single copy of each unique
+template addressed by its hash; project folders receive hard links pointing to
+that content. During updates the collector compares SHA‑1 hashes and replaces
+changed files atomically while skipping duplicates. After each run orphaned
+blobs are removed from `.store` and the count is reported. The accompanying
+`url-registry.json` lists every raw YAML URL fetched along with its size and
+hash for auditing. Repositories returning 404 are noted under
+`deprecated_repos` in `manifest.json` and skipped on subsequent runs.
+
+Press `Ctrl+C` to cancel at any time. The collector will finish the file in
+progress, clean temporary data, write a summary to `run.log` and
+`manifest.json`, then exit without a traceback. On the next run it reads
+`manifest.json` and automatically skips repositories that were already cloned
+successfully so you can resume where you left off. Add `--save-templates
+archive.zip` to produce a reusable archive of the collected templates, noted in
+the final summary.
 
 ## Result :file_folder:
 
