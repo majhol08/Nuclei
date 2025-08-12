@@ -41,14 +41,21 @@ python AllForOne.py --repo-list-url <url> --output-dir <directory>
     📄 copy) while a sticky summary bar tracks totals and ETA. Waiting/backoff
     shows a large countdown, and completion ends with a brief confetti splash.
     A `run.log` captures every step with timestamps while the console remains
-    clean. Unreachable repositories are skipped before cloning and the final
-    report shows counts of successful, skipped, failed and ZIP-fallback clones
-    along with the log path (and success list if requested).
+    clean. Repositories already cloned live in `Templates/.cache/repos` and are
+    updated with `git pull` on subsequent runs, so only new or changed YAML
+    files are copied. Unreachable repositories are skipped before cloning and
+    the final report shows counts of updated, up-to-date, skipped and failed
+    repositories along with the log path, manifest and optional success list.
 <img src="https://i.ibb.co/hCh6vXB/image.png" width=500/>
 
 > **Note:** ensure that you have sufficient free disk space before running the
 > collector. The script will now stop gracefully if the disk fills up while
 > copying templates.
+
+Each copy uses SHA‑1 deduplication: identical YAML files are written once and
+tracked in `content-index.json`. The `manifest.json` remembers the last commit
+or check time for every repository so reruns avoid reprocessing unchanged
+sources.
 
 Press `Ctrl+C` to cancel at any time. The collector will finish the file in
 progress, clean temporary data, write a summary to `run.log` and
